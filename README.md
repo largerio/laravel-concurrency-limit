@@ -360,33 +360,42 @@ new ConcurrencyLimited(
 
 | Method | Meaning |
 |---|---|
-| `releaseAfter($delay)` | Delay before the job is tried again when no slot is free. Default 10 s. |
+| `releaseAfter($delay)` | Delay before the job is tried again when no slot is free, in seconds or as a date. Default 10 s. |
 | `jitter(int $seconds)` | A random extra delay, from 0 to `$seconds`, so jobs rejected together do not come back together. Default: half of `releaseAfter`; none when `releaseAfter` is a date. |
-| `dontRelease()` | Skip the job instead: it is deleted. Explicit opt-in only. |
-| `expireAfter($seconds)` | Slot TTL. Default: the job's timeout plus 10 s, see below. |
+| `dontRelease()` | Skip the job instead: it is deleted. Explicit opt-in only. A `null` `$releaseAfter` does the same. |
+| `expireAfter($seconds)` | Slot TTL, in seconds or as a date. Default: the job's timeout plus 10 s, see below. |
 | `shared()` | Share the pool across job classes. |
-| `withPrefix(string $prefix)` | Change the pool's namespace. |
+| `withPrefix(string $prefix)` | Change the pool's namespace: the prefix goes before the key. None by default. |
 | `failOpen()` / `failClosed()` | Behavior when the cache store fails, as for [HTTP](#when-the-cache-store-fails). Fail-closed releases the job. |
 
-By default each job class has its own pools, one per key. With `shared()`,
-every job class that uses the same key shares one pool.
+By default each job class has its own pools, one per key. A queued listener,
+notification or mailable counts as the class it wraps (its `displayName()`).
+With `shared()`, every job class that uses the same key, and the same prefix,
+shares one pool.
+
+When the cache store fails, a job that fails open runs without a slot, and a
+job that fails closed is handled as when no slot is free: released with its
+usual delay, or skipped with `dontRelease()`. The failure is reported once
+and not rethrown, so it does not count against `$maxExceptions`.
 
 ### Slot TTL
 
 A job that times out is killed by the worker: nothing runs after it, and only
 the slot's TTL frees the slot. So the TTL follows the job's timeout: the
 job's `$timeout` plus 10 seconds, or 70 seconds without one (the worker's
-default `--timeout` of 60 seconds, plus margin). **If your workers run with a
-longer `--timeout` and the job sets no `$timeout`, set `$timeout` on the job
-or call `expireAfter()`**, or a long job may lose its slot while it still
-runs.
+default `--timeout` of 60 seconds, plus margin). A `$timeout` of 0, which
+turns the timeout off, counts as none. **If your workers run with a longer
+`--timeout` and the job sets no `$timeout`, set `$timeout` on the job or call
+`expireAfter()`**, or a long job may lose its slot while it still runs.
 
 ### Sync queue and `dispatchSync()`
 
 The sync driver has no queue to return a job to. When no slot is free and the
 job runs on the sync driver, through `dispatchSync()`, or without
 `InteractsWithQueue`, the middleware throws `ConcurrencyLimitExceededException`
-to the caller rather than lose the job.
+to the caller rather than lose the job, even with `dontRelease()`. So does a
+store failure when the job fails closed. The `deferred` and `background`
+drivers run jobs as the sync driver does, and behave the same.
 
 `block()` does not exist for jobs: a waiting job would hold a worker, while
 releasing is the queue's own way to wait.
@@ -404,6 +413,9 @@ differences are deliberate:
 - The release delay defaults to 10 seconds plus jitter, not 0: an immediate
   release spins the queue and burns attempts.
 - A job that cannot be released throws, rather than vanish.
+- There is no prefix by default, rather than `laravel-queue-concurrency:`:
+  the package names and hashes its own cache keys, so the prefix only tells
+  pools apart.
 - `jitter()`, `failOpen()` and `failClosed()` are new.
 
 ## Events
@@ -417,9 +429,10 @@ All in `Largerio\ConcurrencyLimit\Events`, with public readonly properties:
 | `SlotReleased` | Once per slot released | `string $limiter`, `string $key`, `int $max`, `float $held` (seconds) |
 
 `$key` is the key as given, before hashing. For jobs, `$limiter` is
-`job:{JobClass}`, or `job` with `shared()`. Nothing is dispatched when a
-store failure lets a request or job through without a slot: the report is
-the signal.
+`job:{JobClass}`, or `job` with `shared()`, and `$key` starts with the
+`withPrefix()` prefix, if any; a job skipped with `dontRelease()` is a
+rejection too. Nothing is dispatched when a store failure lets a request or
+job through without a slot: the report is the signal.
 
 Metrics are a listener away:
 
@@ -479,7 +492,7 @@ The defaults, and why:
 | `Slots::expireAfter()` | `60` s | Must exceed the longest request: PHP's default `max_execution_time` is 30 s. Raise it for long streams. |
 | Poll interval while waiting | 100 ms ± 50% | Reactive enough for a wait of a second or two. Not configurable. |
 | Job `releaseAfter()` | `10` s | Long enough not to spin the queue, short enough to keep the throughput. |
-| Job `jitter()` | Half of `releaseAfter` | Spreads the retries of jobs rejected together. |
+| Job `jitter()` | Half of `releaseAfter`, none for a date | Spreads the retries of jobs rejected together. |
 | Job `expireAfter()` | Job timeout + 10 s, else 70 s | Just above the point where the worker kills the job. |
 
 A TTL that is too short over-admits silently: the slot expires while the
@@ -573,7 +586,8 @@ one by one, not by prefix.
 
 A request that outlives `expireAfter()` loses its slot: one more execution
 may get in, and the late release does nothing. Set `expireAfter()` above the
-longest duration you expect, streams included.
+longest duration you expect, streams included. The same goes for a job,
+whose slot follows its timeout by default (see [Slot TTL](#slot-ttl)).
 
 When a client disconnects in the middle of a stream, PHP stops the script and
 `terminate()` never runs: the slot frees itself when its TTL runs out. This
@@ -584,6 +598,8 @@ is accepted: a safety net that runs at shutdown would pile up under Octane.
 The package keeps no static state and no per-request data on its middleware.
 The manager holds only the limiter closures registered at boot, `Slots` are
 built per request, and the slots a request holds live on the request itself.
+The job middleware holds only its settings, so it can be serialized with the
+job (`through()`), and it builds its limit for each job it runs.
 
 ## Coming from laravel-concurrent-limiter
 
