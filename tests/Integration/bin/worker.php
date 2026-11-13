@@ -7,21 +7,35 @@ declare(strict_types=1);
  * Largerio\ConcurrencyLimit\Tests\Integration\Support\Workers.
  *
  * It boots an application on the store under test and prints a "ready" line,
- * waits for the start time the driver writes on stdin, then takes a slot,
- * works and gives the slot back, as a request going through the middleware
- * would. It ends with one JSON line whose timestamps are taken inside the
- * critical section. With "hold", it announces the slot and waits to be killed.
+ * waits for the start time the driver writes on stdin, then does its work
+ * under a slot, in one of three ways ("via"):
+ *
+ * - pool: takes the slot from the SlotPool, works and gives it back;
+ * - http: sends one request through the HTTP kernel and the concurrency
+ *   middleware, to a route that works;
+ * - stream: the same, to a route whose streamed response works while its
+ *   body is sent, between the kernel's handle() and terminate().
+ *
+ * It ends with one JSON line whose timestamps are taken inside the critical
+ * section. With "hold", it announces the slot and waits to be killed.
  */
 
 namespace Largerio\ConcurrencyLimit\Tests\Integration;
 
+use Illuminate\Contracts\Http\Kernel;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
+use Illuminate\Support\Facades\Route;
 use Largerio\ConcurrencyLimit\ConcurrencyLimitServiceProvider;
+use Largerio\ConcurrencyLimit\Events\SlotAcquired;
 use Largerio\ConcurrencyLimit\Exceptions\ConcurrencyLimitExceededException;
 use Largerio\ConcurrencyLimit\Exceptions\StoreUnavailableException;
+use Largerio\ConcurrencyLimit\Facades\ConcurrencyLimit;
 use Largerio\ConcurrencyLimit\SlotPool;
 use Largerio\ConcurrencyLimit\Slots;
 use Orchestra\Testbench\Foundation\Application;
+use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
 require __DIR__.'/../../../vendor/autoload.php';
@@ -45,9 +59,11 @@ $say = function (array $line): void {
  *     fail_open: ?bool,
  *     work_ms: int,
  *     hold: bool,
+ *     via?: 'pool'|'http'|'stream',
  * } $options
  */
 $options = json_decode($argv[1] ?? '', true, flags: JSON_THROW_ON_ERROR);
+$via = $options['via'] ?? 'pool';
 
 $app = Application::create(options: ['extra' => ['dont-discover' => ['*']]]);
 $app->register(ConcurrencyLimitServiceProvider::class);
@@ -55,45 +71,24 @@ $app->register(ConcurrencyLimitServiceProvider::class);
 config($options['config']);
 
 $exceptions = Exceptions::fake();
-$pool = $app->make(SlotPool::class);
 
-$slots = Slots::max($options['max'])
-    ->by($options['key'])
-    ->block($options['block'])
-    ->expireAfter($options['expire_after']);
+$limit = function () use ($options): Slots {
+    $slots = Slots::max($options['max'])
+        ->by($options['key'])
+        ->block($options['block'])
+        ->expireAfter($options['expire_after']);
 
-match ($options['fail_open']) {
-    true => $slots->failOpen(),
-    false => $slots->failClosed(),
-    null => $slots,
+    return match ($options['fail_open']) {
+        true => $slots->failOpen(),
+        false => $slots->failClosed(),
+        null => $slots,
+    };
 };
 
-$say(['ready' => true]);
+$result = ['arrive' => null, 'start' => null, 'end' => null, 'leased' => false, 'status' => 200, 'retry_after' => null, 'error' => null];
 
-$startAt = (float) fgets(STDIN);
-
-while (microtime(true) < $startAt) {
-    usleep(100);
-}
-
-$result = ['arrive' => microtime(true), 'start' => null, 'end' => null, 'leased' => false, 'status' => 200, 'error' => null];
-$leases = null;
-
-try {
-    $leases = $pool->acquire($options['limiter'], [$slots]);
-} catch (ConcurrencyLimitExceededException) {
-    $result['status'] = 429;
-} catch (StoreUnavailableException) {
-    $result['status'] = 503;
-} catch (Throwable $exception) {
-    $result['status'] = 500;
-    $class = $exception::class;
-    $result['error'] = "{$class}: {$exception->getMessage()}";
-}
-
-if ($leases !== null) {
+$work = function () use (&$result, $options, $say): void {
     $result['start'] = microtime(true);
-    $result['leased'] = $leases !== [];
 
     if ($options['hold']) {
         $say(['held' => $result['start']]);
@@ -104,8 +99,71 @@ if ($leases !== null) {
     usleep($options['work_ms'] * 1000);
 
     $result['end'] = microtime(true);
+};
 
-    $pool->release($leases);
+$pool = $app->make(SlotPool::class);
+$kernel = $app->make(Kernel::class);
+
+Event::listen(SlotAcquired::class, function () use (&$result): void {
+    $result['leased'] = true;
+});
+
+ConcurrencyLimit::for($options['limiter'], $limit);
+
+Route::get('/work', function () use ($work, $via): Response|string {
+    if ($via === 'stream') {
+        return response()->stream($work);
+    }
+
+    $work();
+
+    return 'done';
+})->middleware("concurrency:{$options['limiter']}");
+
+$say(['ready' => true]);
+
+$startAt = (float) fgets(STDIN);
+
+while (microtime(true) < $startAt) {
+    usleep(100);
+}
+
+$result['arrive'] = microtime(true);
+
+if ($via === 'pool') {
+    $leases = null;
+
+    try {
+        $leases = $pool->acquire($options['limiter'], [$limit()]);
+    } catch (ConcurrencyLimitExceededException) {
+        $result['status'] = 429;
+    } catch (StoreUnavailableException) {
+        $result['status'] = 503;
+    } catch (Throwable $exception) {
+        $result['status'] = 500;
+        $class = $exception::class;
+        $result['error'] = "{$class}: {$exception->getMessage()}";
+    }
+
+    if ($leases !== null) {
+        $work();
+
+        $pool->release($leases);
+    }
+}
+
+if ($via !== 'pool') {
+    $response = $kernel->handle($request = Request::create('/work'));
+
+    // Response::send() runs a stream between handle() and terminate(); the body is discarded.
+    ob_start(fn (): string => '');
+    $response->sendContent();
+    ob_end_clean();
+
+    $kernel->terminate($request, $response);
+
+    $result['status'] = $response->getStatusCode();
+    $result['retry_after'] = $response->headers->get('Retry-After');
 }
 
 $result['done'] = microtime(true);

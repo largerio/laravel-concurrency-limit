@@ -71,6 +71,10 @@ final class Slots
 
     public function retryAfter(int $seconds): self
     {
+        if ($seconds < 0) {
+            throw new InvalidArgumentException("The Retry-After delay must be at least 0 seconds, got {$seconds}.");
+        }
+
         $this->retryAfter = $seconds;
 
         return $this;

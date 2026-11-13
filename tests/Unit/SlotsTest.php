@@ -51,11 +51,16 @@ it('accepts a limit of zero, which always rejects', function (): void {
     expect(Slots::max(0)->max)->toBe(0);
 });
 
+it('accepts a Retry-After of zero', function (): void {
+    expect(Slots::max(1)->retryAfter(0)->retryAfter)->toBe(0);
+});
+
 it('rejects invalid settings', function (Closure $build, string $message): void {
     expect($build)->toThrow(InvalidArgumentException::class, $message);
 })->with([
     'negative max' => [fn (): Slots => Slots::max(-1), 'The maximum number of slots must be at least 0, got -1.'],
     'zero expiry' => [fn (): Slots => Slots::max(1)->expireAfter(0), 'Slots must expire after at least 1 second, got 0.'],
+    'negative retry after' => [fn (): Slots => Slots::max(1)->retryAfter(-1), 'The Retry-After delay must be at least 0 seconds, got -1.'],
     'negative block' => [fn (): Slots => Slots::max(1)->block(-0.5), 'The time to wait for a slot must be a finite number of seconds of at least 0, got -0.5.'],
     'infinite block' => [fn (): Slots => Slots::max(1)->block(INF), 'The time to wait for a slot must be a finite number of seconds of at least 0, got INF.'],
     'NaN block' => [fn (): Slots => Slots::max(1)->block(NAN), 'The time to wait for a slot must be a finite number of seconds of at least 0, got NAN.'],

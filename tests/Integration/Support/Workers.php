@@ -18,9 +18,11 @@ use RuntimeException;
  *     done: float,
  *     leased: bool,
  *     status: int,
+ *     retry_after?: ?string,
  *     error: ?string,
  *     reports: list<array{class: string, message: string, previous: ?string}>,
  * }
+ * @phpstan-type Via 'pool'|'http'|'stream'
  */
 final class Workers
 {
@@ -45,7 +47,8 @@ final class Workers
      *     fail_open?: ?bool,
      *     work_ms?: int,
      *     hold?: bool,
-     * }  $options
+     *     via?: Via,
+     * }  $options  via: through the SlotPool (default), the HTTP middleware, or a streamed response
      */
     public function __construct(int $count, array $options)
     {
@@ -55,6 +58,7 @@ final class Workers
             'fail_open' => null,
             'work_ms' => 0,
             'hold' => false,
+            'via' => 'pool',
         ], JSON_THROW_ON_ERROR)];
 
         for ($started = 0; $started < $count; $started++) {
@@ -78,7 +82,7 @@ final class Workers
     }
 
     /**
-     * @param  array{config: array<string, mixed>, limiter: string, key: string, max: int, block?: float, expire_after?: int, fail_open?: ?bool, work_ms?: int}  $options
+     * @param  array{config: array<string, mixed>, limiter: string, key: string, max: int, block?: float, expire_after?: int, fail_open?: ?bool, work_ms?: int, via?: Via}  $options
      * @return list<Result>
      */
     public static function run(int $count, array $options): array

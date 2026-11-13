@@ -62,8 +62,8 @@ such as Redis, Memcached or the database store (see
 composer require largerio/laravel-concurrency-limit
 ```
 
-The service provider is discovered automatically. Publishing the
-configuration file is optional:
+The service provider and the `ConcurrencyLimit` facade are discovered
+automatically. Publishing the configuration file is optional:
 
 ```bash
 php artisan vendor:publish --tag=concurrency-limit-config
@@ -108,8 +108,10 @@ ConcurrencyLimit::for('api', fn (Request $request) => Slots::max(10));
 
 The closure receives the request and returns a `Slots`, an array of `Slots`
 ([multiple limits](#multiple-limits)), or `null` for no limit on this
-request. A route naming a limiter that was never registered throws an
-`InvalidArgumentException` on its first request.
+request. It runs on every request, so build the `Slots` inside it. A route
+naming a limiter that was never registered throws an
+`InvalidArgumentException` on its first request, and so does a limiter that
+returns anything else.
 
 `concurrency:api` is the middleware alias. For route definitions that avoid
 aliases, `LimitConcurrentRequests::using()` returns the same string, as
@@ -132,7 +134,7 @@ user has at most 10 requests in flight across all of them.
 | `->by(string\|int $key)` | user, else IP | Key the limit is counted against. |
 | `->block(int\|float $seconds)` | `0` | Opt-in: wait up to this long for a slot before rejecting. |
 | `->expireAfter(int $seconds)` | `60` | Slot TTL: when a slot frees itself if it is never released. At least `1`. |
-| `->retryAfter(int $seconds)` | `1` | Value of the `Retry-After` header on rejection. |
+| `->retryAfter(int $seconds)` | `1` | Value of the `Retry-After` header on rejection. At least `0`; `0` sends no header. |
 | `->response(Closure $callback)` | 429 exception | Custom rejection response. |
 | `->failOpen()` / `->failClosed()` | config `fail_open` | Behavior when the cache store fails. |
 
@@ -156,7 +158,8 @@ The default key is the class of the authenticated user and its identifier
 `App\Models\Admin` #1 and `App\Models\User` #1 never share a pool, while one
 user reaching the application through two guards (`web` and `sanctum`, say)
 keeps a single pool. Two guards that share one model class for different
-populations need a custom `by()`.
+populations need a custom `by()`. A user whose identifier is neither an
+integer nor a string is counted by IP address, like a guest.
 
 A pool belongs to its limiter: the key `user:1` in `exports` and the key
 `user:1` in `reports` are two pools. Keys can be any string: they are hashed
@@ -211,8 +214,12 @@ Slots::max(2)->retryAfter(5)->response(
 ```
 
 The callback has the signature of `Illuminate\Cache\RateLimiting\Limit::response()`:
-`$headers` holds the `Retry-After` header. No `X-RateLimit-*` header is sent:
-those describe a rate window, and would be wrong here.
+`$headers` holds the `Retry-After` header, and the callback returns the
+response. No `X-RateLimit-*` header is sent: those describe a rate window,
+and would be wrong here.
+
+With [multiple limits](#multiple-limits), the `Retry-After` header and the
+callback are those of the limit that refused.
 
 ### When the cache store fails
 
@@ -224,13 +231,19 @@ Slots::max(5)->failClosed();   // per limiter
 
 - **Fail-open** (the default): the request or job runs without a slot.
 - **Fail-closed**: a request gets a `503 Service Unavailable` with
-  `Retry-After`; a job is released back to the queue, as when no slot is
-  free.
+  `Retry-After` (the largest `retryAfter()` among the request's limits); a
+  job is released back to the queue, as when no slot is free.
 
-In both modes the failure is passed to `report()` as a
-`StoreUnavailableException`, wrapping the store's own exception, and never
-becomes a `500`. To throttle or silence these reports during an outage, use
-the exception handler's own tools:
+With [multiple limits](#multiple-limits), one limit that fails closed is
+enough: running without its slot would break its guarantee.
+
+In both modes the failure is passed to `report()` once, as a
+`StoreUnavailableException` wrapping the store's own exception, and never
+becomes a `500`. The `503` is a Symfony `ServiceUnavailableHttpException`
+whose previous exception is that `StoreUnavailableException`: your exception
+handler renders it (JSON clients get JSON) and, as for any HTTP exception,
+does not report it again. To throttle or silence the reports during an
+outage, use the exception handler's own tools:
 
 ```php
 // bootstrap/app.php
@@ -262,11 +275,12 @@ Route::get('/export', ExportController::class)->middleware('concurrency:2');    
 Route::get('/import', ImportController::class)->middleware('concurrency:2,imports');  // separate pool "imports"
 ```
 
-When the first parameter is not a registered limiter but a number, the route
-gets `Slots::max(...)` with the default key, in the pool named by the second
-parameter, `default` if there is none. Routes that use the inline form
+When the first parameter is not a registered limiter but a whole number, the
+route gets `Slots::max(...)` with the default key, in the pool named by the
+second parameter, `default` if there is none. Routes that use the inline form
 without a pool name therefore share the `default` pool: name a pool to count
-a route on its own.
+a route on its own. A pool name counts like a limiter name: a named limiter
+of the same name, with the same key, shares its slots.
 
 ### Middleware order
 
@@ -278,10 +292,16 @@ the route lists them in:
 - requests that `throttle` rejects take no slot;
 - a rejection costs no database query.
 
-If your application replaces the priority list
-(`$middleware->priority([...])` in `bootstrap/app.php`), add
-`LimitConcurrentRequests::class` to it after the authentication and
-throttling middleware.
+If your application sets its own priority list
+(`$middleware->priority([...])` in `bootstrap/app.php`), the package still
+inserts `LimitConcurrentRequests` right after the last of
+`AuthenticatesRequests`, `ThrottleRequests` and `ThrottleRequestsWithRedis`
+that your list contains. If your list puts `SubstituteBindings` before them,
+the middleware comes after it too: authentication first matters more. If
+your list contains none of the three, the middleware ends up last, with no
+order relative to authentication: add `LimitConcurrentRequests::class` to
+your list yourself, after the authentication and throttling middleware. A
+place your list gives it is kept.
 
 ### When a slot is released
 
@@ -598,8 +618,11 @@ is accepted: a safety net that runs at shutdown would pile up under Octane.
 The package keeps no static state and no per-request data on its middleware.
 The manager holds only the limiter closures registered at boot, `Slots` are
 built per request, and the slots a request holds live on the request itself.
-The job middleware holds only its settings, so it can be serialized with the
-job (`through()`), and it builds its limit for each job it runs.
+The default key is set on a copy of the `Slots` a limiter returns, so a
+`Slots` instance kept between requests never carries one user's key into
+another request. The job middleware holds only its settings, so it can be
+serialized with the job (`through()`), and it builds its limit for each job it
+runs.
 
 ## Coming from laravel-concurrent-limiter
 

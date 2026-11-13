@@ -75,7 +75,10 @@
         "laravel": {
             "providers": [
                 "Largerio\\ConcurrencyLimit\\ConcurrencyLimitServiceProvider"
-            ]
+            ],
+            "aliases": {
+                "ConcurrencyLimit": "Largerio\\ConcurrencyLimit\\Facades\\ConcurrencyLimit"
+            }
         }
     }
 }
