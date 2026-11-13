@@ -3,11 +3,11 @@
 #
 #   make check                      lint + analyse + test, the local gate
 #   make test ARGS="--filter=Slots"  extra arguments are passed to Pest
-#   make test PHP_VERSION=8.3       any target on another PHP version
+#   make test PHP_VERSION=8.4       any target on another PHP version
 #   make matrix                     the test suite on every supported PHP version
 
 PHP_VERSION ?= 8.5
-PHP_VERSIONS := 8.3 8.4 8.5
+PHP_VERSIONS := 8.4 8.5
 
 export PHP_VERSION
 export DOCKER_UID := $(shell id -u)

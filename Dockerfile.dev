@@ -1,35 +1,40 @@
-# syntax=docker/dockerfile:1
-
 # Development image only: the package itself ships no image. Every base is
 # pinned by digest; Dependabot bumps tag and digest together.
 #
-# PHP_VERSION selects one of the php-* stages below (8.3, 8.4 or 8.5).
+# PHP_VERSION selects one of the php-* stages below (8.4 or 8.5).
 ARG PHP_VERSION=8.5
 
 FROM composer:2.11.2@sha256:5bcb28b8d0edc4091125f8218f9d088f998bdfc843f8fbb9a4beb4dcd8625684 AS composer
 FROM mlocati/php-extension-installer:2.13.2@sha256:4fd45396c16685266d32bf147a24ecd5e81029d3820295895bf4a90131190ac9 AS php-extension-installer
 
-FROM php:8.3.36-cli-alpine3.24@sha256:e7699f91d3b46283a49bde02379266dd98d87844e08aed1ff7ea6a7d1f031268 AS php-8.3
 FROM php:8.4.27-cli-alpine3.24@sha256:b9014f1cc1983827459faed83b315a40ead9860bdadefc042b31f1540ef8c746 AS php-8.4
 FROM php:8.5.12-cli-alpine3.24@sha256:1ff5b45922ab30f418447c6089dbe2eba5f01e0b2742863d0327ac349305d70f AS php-8.5
 
-FROM php-${PHP_VERSION} AS dev
+# A stage defined above, already pinned by digest.
+# hadolint ignore=DL3006
+FROM php-${PHP_VERSION}
 
 # pcov for coverage, pcntl for the multi-process integration suite, redis
-# (phpredis) and memcached for the stores under test. pdo_sqlite ships with
-# the base image.
-COPY --from=php-extension-installer /usr/bin/install-php-extensions /usr/local/bin/
-RUN apk add --no-cache git unzip \
-    && install-php-extensions memcached pcntl pcov redis \
-    && rm /usr/local/bin/install-php-extensions
-
-COPY --from=composer /usr/bin/composer /usr/local/bin/composer
-
+# (phpredis) and memcached for the stores under test; pdo_sqlite ships with the
+# base image. The installer is bind-mounted, so it never lands in a layer, and
+# it removes the build dependencies it adds once the extensions are compiled.
+#
 # The container runs as the host user (see docker-compose.dev.yml), who has no
-# home directory here. COMPOSER_HOME is world-writable, and so is its cache
-# directory: the named volume mounted there copies these permissions.
+# home directory here: COMPOSER_HOME and its cache are world-writable, and the
+# named volume mounted on the cache copies these permissions.
+# hadolint ignore=DL3018
+RUN --mount=type=bind,from=php-extension-installer,source=/usr/bin/install-php-extensions,target=/usr/local/bin/install-php-extensions \
+    apk add --no-cache git unzip \
+    && install-php-extensions memcached pcntl pcov redis \
+    && git config --system --add safe.directory /app \
+    && mkdir -p /composer/cache \
+    && chmod -R 1777 /composer
+
+COPY --from=composer --link /usr/bin/composer /usr/local/bin/composer
+
 ENV COMPOSER_HOME=/composer
-RUN mkdir -p /composer/cache && chmod -R 1777 /composer \
-    && git config --system --add safe.directory /app
+
+# Never root, even when the image is run without docker-compose.dev.yml.
+USER 1000:1000
 
 WORKDIR /app

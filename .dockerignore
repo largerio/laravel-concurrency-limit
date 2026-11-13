@@ -1,0 +1,3 @@
+# Dockerfile.dev copies nothing from the repository (it is bind-mounted at run
+# time), so the build context stays empty.
+*

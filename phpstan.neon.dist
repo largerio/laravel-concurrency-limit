@@ -1,12 +1,29 @@
-# Larastan, strict rules and deprecation rules are loaded by
+# Larastan, Pest, strict rules and deprecation rules are loaded by
 # phpstan/extension-installer. The minimum PHP version is read from composer.json.
+includes:
+    - phar://phpstan.phar/conf/bleedingEdge.neon
+
 parameters:
-    level: 9
+    level: max
+    # Pest test files are left out: Pest's API is resolved through __call on
+    # @internal classes, which no analyser can type. Plain PHP under tests/
+    # (base test case, fixtures, integration worker) is analysed.
     paths:
         - config
         - src
+        - tests/TestCase.php
     tmpDir: build/phpstan
+
+    checkBenevolentUnionTypes: true
+    checkMissingCallableSignature: true
     checkOctaneCompatibility: true
+    checkTooWideReturnTypesInProtectedAndPublicMethods: true
+    checkUninitializedProperties: true
+    reportAlwaysTrueInLastCondition: true
+    reportAnyTypeWideningInVarTag: true
+    reportPossiblyNonexistentConstantArrayOffset: true
+    reportPossiblyNonexistentGeneralArrayOffset: true
+
     ignoreErrors:
         # The package's config file is merged into the application's config,
         # where env() is allowed; Larastan only recognises the application's
