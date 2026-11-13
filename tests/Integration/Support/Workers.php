@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Largerio\ConcurrencyLimit\Tests\Integration\Support;
 
+use JsonException;
 use OutOfBoundsException;
 use RuntimeException;
 
@@ -194,7 +195,15 @@ final class Workers
             throw new RuntimeException("Worker {$index} stopped without a result:\n{$stderr}");
         }
 
-        /** @var array<string, mixed> */
-        return json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+        try {
+            /** @var array<string, mixed> */
+            return json_decode($line, true, flags: JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $stderr = (string) file_get_contents($worker['stderr']);
+            $this->kill();
+            $output = $line.stream_get_contents($worker['stdout']);
+
+            throw new RuntimeException("Worker {$index} printed something other than a JSON line:\n{$output}\nstderr:\n{$stderr}");
+        }
     }
 }
