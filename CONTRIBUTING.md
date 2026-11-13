@@ -77,8 +77,8 @@ would. `make matrix` installs each PHP version's dependencies in
 - `declare(strict_types=1)` in every PHP file.
 - [Pint](https://laravel.com/docs/pint) with the Laravel preset, and
   [Rector](https://getrector.com/) for the PHP version sets, dead code,
-  code quality, type declarations and early returns. `make format` applies
-  both.
+  code quality, type declarations, privatization and early returns.
+  `make format` applies both.
 - [PHPStan](https://phpstan.org/) at level `max`, with bleeding edge,
   Larastan, the strict rules and the deprecation rules, over `src/`,
   `config/` and the plain PHP of `tests/`. Pest test files are left out:
@@ -124,11 +124,15 @@ make test ARGS="--group=integration"           # the integration group only
 ```
 
 In CI, the `test` job runs everything but the integration group, on PHP 8.4
-and 8.5, with the lowest and the newest dependencies. The `integration` job
-runs the group against Redis and Memcached service containers, the same
-images as `docker-compose.dev.yml`, once on the newest dependencies and once
-on the lowest Laravel version supported. The `coverage` job runs the whole
-suite.
+and 8.5, with the lowest and the newest dependencies Composer installs. The
+`integration` job runs the group against Redis and Memcached service
+containers, the same images as `docker-compose.dev.yml`, once on the newest
+dependencies and once on the oldest Laravel release Composer installs. The
+`coverage` job runs the whole suite.
+
+Composer refuses to install a release that has a known security advisory,
+and Testbench and Pest set floors of their own, so the lowest versions
+tested can be above the lower bounds of `composer.json`.
 
 ## CI
 

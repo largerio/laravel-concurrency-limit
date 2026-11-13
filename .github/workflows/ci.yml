@@ -44,8 +44,10 @@ jobs:
       - name: Analyse
         run: composer analyse
 
-  # Both ends of every range composer.json allows, on each supported PHP. The
-  # integration group needs Redis and Memcached: the integration job runs it.
+  # The lowest and the newest versions Composer installs within the ranges of
+  # composer.json, on each supported PHP. Composer refuses releases that have
+  # a security advisory, so the lowest can sit above a range's lower bound.
+  # The integration group needs Redis and Memcached: the integration job runs it.
   test:
     name: test (PHP ${{ matrix.php }}, ${{ matrix.dependencies }})
     runs-on: ubuntu-latest
@@ -100,7 +102,10 @@ jobs:
           done
 
   # Real processes against real stores: the multi-process suite. Once on the
-  # newest versions, once on the lowest Laravel composer.json allows.
+  # newest versions, once on the oldest Laravel release Composer installs, the
+  # other dependencies newest. Below 13.30, every release has a security
+  # advisory, which Composer refuses, and Testbench with Pest 5 needs 13.23 at
+  # least: raise this constraint when that floor moves.
   integration:
     name: integration (PHP ${{ matrix.php }}, Laravel ${{ matrix.laravel || 'latest' }})
     needs: images
@@ -115,7 +120,7 @@ jobs:
           - php: "8.5"
             laravel: ""
           - php: "8.4"
-            laravel: "13.0.*"
+            laravel: "13.30.*"
     # Hardened as in docker-compose.dev.yml: no capabilities, no privilege
     # escalation, read-only root filesystem, Redis as its own user.
     services:

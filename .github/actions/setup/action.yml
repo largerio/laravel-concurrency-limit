@@ -15,7 +15,7 @@ inputs:
     required: false
     default: none
   laravel:
-    description: A constraint on laravel/framework, such as `13.0.*`; empty for none.
+    description: A constraint on laravel/framework, such as `13.30.*`; empty for none.
     required: false
     default: ""
   composer-args:

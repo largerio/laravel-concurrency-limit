@@ -114,7 +114,8 @@ naming a limiter that was never registered throws an
 returns anything else.
 
 `concurrency:api` is the middleware alias. For route definitions that avoid
-aliases, `LimitConcurrentRequests::using()` returns the same string, as
+aliases, `LimitConcurrentRequests::using('api')` returns the same middleware
+named by its class (`LimitConcurrentRequests::class.':api'`), as
 `ThrottleRequests::using()` does:
 
 ```php
@@ -130,9 +131,9 @@ user has at most 10 requests in flight across all of them.
 
 | Method | Default | Meaning |
 |---|---|---|
-| `Slots::max(int $max)` | required | Maximum simultaneous executions per key. `0` always rejects. |
+| `Slots::max(int $max)` | required | Maximum simultaneous executions per key. At least `0`; `0` always rejects. |
 | `->by(string\|int $key)` | user, else IP | Key the limit is counted against. |
-| `->block(int\|float $seconds)` | `0` | Opt-in: wait up to this long for a slot before rejecting. |
+| `->block(int\|float $seconds)` | `0` | Opt-in: wait up to this long for a slot before rejecting. At least `0`. |
 | `->expireAfter(int $seconds)` | `60` | Slot TTL: when a slot frees itself if it is never released. At least `1`. |
 | `->retryAfter(int $seconds)` | `1` | Value of the `Retry-After` header on rejection. At least `0`; `0` sends no header. |
 | `->response(Closure $callback)` | 429 exception | Custom rejection response. |
@@ -201,9 +202,9 @@ several limits, the wait is the smallest `block()` among them.
 
 By default a rejection throws `ConcurrencyLimitExceededException`, which
 extends Symfony's `TooManyRequestsHttpException`. The application's exception
-handler renders it as `429 Too Many Requests`, with `Retry-After: 1` and the
-message `Too Many Concurrent Requests.`; JSON clients get JSON, as with
-`throttle`.
+handler renders it as `429 Too Many Requests`, with `Retry-After: 1`. JSON
+clients get JSON, as with `throttle`, with the message
+`Too Many Concurrent Requests.`
 
 To answer something else:
 
@@ -238,7 +239,7 @@ With [multiple limits](#multiple-limits), one limit that fails closed is
 enough: running without its slot would break its guarantee.
 
 In both modes the failure is passed to `report()` once, as a
-`StoreUnavailableException` wrapping the store's own exception, and never
+`StoreUnavailableException` wrapping the error the store raised, and never
 becomes a `500`. The `503` is a Symfony `ServiceUnavailableHttpException`
 whose previous exception is that `StoreUnavailableException`: your exception
 handler renders it (JSON clients get JSON) and, as for any HTTP exception,
@@ -380,10 +381,10 @@ new ConcurrencyLimited(
 
 | Method | Meaning |
 |---|---|
-| `releaseAfter($delay)` | Delay before the job is tried again when no slot is free, in seconds or as a date. Default 10 s. |
+| `releaseAfter($delay)` | Delay before the job is tried again when no slot is free, in seconds (at least 0) or as a date. Default 10 s. |
 | `jitter(int $seconds)` | A random extra delay, from 0 to `$seconds`, so jobs rejected together do not come back together. Default: half of `releaseAfter`; none when `releaseAfter` is a date. |
 | `dontRelease()` | Skip the job instead: it is deleted. Explicit opt-in only. A `null` `$releaseAfter` does the same. |
-| `expireAfter($seconds)` | Slot TTL, in seconds or as a date. Default: the job's timeout plus 10 s, see below. |
+| `expireAfter($seconds)` | Slot TTL, in seconds or as a date, at least 1 second. Default: the job's timeout plus 10 s, see below. |
 | `shared()` | Share the pool across job classes. |
 | `withPrefix(string $prefix)` | Change the pool's namespace: the prefix goes before the key. None by default. |
 | `failOpen()` / `failClosed()` | Behavior when the cache store fails, as for [HTTP](#when-the-cache-store-fails). Fail-closed releases the job. |
@@ -414,8 +415,13 @@ The sync driver has no queue to return a job to. When no slot is free and the
 job runs on the sync driver, through `dispatchSync()`, or without
 `InteractsWithQueue`, the middleware throws `ConcurrencyLimitExceededException`
 to the caller rather than lose the job, even with `dontRelease()`. So does a
-store failure when the job fails closed. The `deferred` and `background`
-drivers run jobs as the sync driver does, and behave the same.
+store failure when the job fails closed.
+
+The `deferred` and `background` drivers run the job on the sync driver too,
+once the response is sent or in another process, where the exception has no
+caller to reach. The job fails there: its `failed()` method runs and
+`JobFailed` is dispatched, but it is not retried, and the exception, an HTTP
+exception, is not reported. Put limited jobs on a real queue.
 
 `block()` does not exist for jobs: a waiting job would hold a worker, while
 releasing is the queue's own way to wait.
@@ -451,8 +457,8 @@ All in `Largerio\ConcurrencyLimit\Events`, with public readonly properties:
 `$key` is the key as given, before hashing. For jobs, `$limiter` is
 `job:{JobClass}`, or `job` with `shared()`, and `$key` starts with the
 `withPrefix()` prefix, if any; a job skipped with `dontRelease()` is a
-rejection too. Nothing is dispatched when a store failure lets a request or
-job through without a slot: the report is the signal.
+rejection too. Nothing is dispatched on a store failure, whether the limit
+fails open or closed: the report is the signal.
 
 Metrics are a listener away:
 
@@ -473,11 +479,11 @@ test process, on the `array` store. Three recipes cover what you need:
 
 // 2. Force the rejection path to test your 429 handling.
 ConcurrencyLimit::for('exports', fn () => Slots::max(0));
-$this->getJson('/exports')->assertTooManyRequests()->assertHeader('Retry-After', 1);
+$this->postJson('/exports')->assertTooManyRequests()->assertHeader('Retry-After', 1);
 
 // 3. Assert a route or job is limited.
 Event::fake([SlotAcquired::class]);
-$this->get('/exports');
+$this->post('/exports');
 Event::assertDispatched(SlotAcquired::class, fn ($event) => $event->limiter === 'exports');
 ```
 
@@ -561,7 +567,7 @@ Any store that implements `Illuminate\Contracts\Cache\LockProvider` works.
 | `dynamodb` | Implements locks, but the integration tests don't cover it. |
 | `array` | One process only: fine for tests, meaningless under PHP-FPM, where each worker has its own. |
 | `null` | Grants every slot, so nothing is limited: a way to turn the package off in one environment. |
-| `failover` | Supported. Slots taken on the secondary store during an outage are unknown to the primary once it is back, so a few extra executions may get in at the switch. |
+| `failover` | Supported, with a limit: it moves on to the next store only when a store fails to create the lock, which in practice means a phpredis connection that cannot be opened. When the error only comes as the lock is taken (predis, the database store, a connection lost while the process runs), the limit fails open or closed as with any store. Slots taken on the secondary store during an outage are unknown to the primary once it is back, so a few extra executions may get in at the switch. |
 | `apc`, `session`, a custom store without locks | Throws a `LogicException` on first use, in both fail modes. |
 
 ### Database store and transactions
@@ -583,8 +589,8 @@ difference. Redis and Memcached expire keys by their own clock.
 `Memcached::add()` answers `false` both when the key exists and when the
 server cannot be reached, so a dead Memcached would look like a full pool.
 After a refused scan, the package checks the client's result code, and
-treats anything but "not stored" as a store failure, which then fails open or
-closed.
+treats anything but "the key already exists" as a store failure, which then
+fails open or closed.
 
 On Memcached and the file store, the framework releases a lock in two steps,
 reading its owner then deleting it. If the slot expires between the two, the
