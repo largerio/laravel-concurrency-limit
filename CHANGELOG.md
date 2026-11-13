@@ -6,6 +6,8 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-13
+
 The first release. It replaces `largerio/laravel-concurrent-limiter`, written
 again from scratch: see
 [Coming from laravel-concurrent-limiter](README.md#coming-from-laravel-concurrent-limiter).
@@ -26,4 +28,5 @@ again from scratch: see
 - Events: `SlotAcquired`, `SlotReleased` and `ConcurrencyLimitExceeded`. `SlotReleased` balances `SlotAcquired`, even when a `SlotAcquired` listener throws.
 - Works on any cache store with atomic locks. Requires PHP 8.4 or later and `laravel/framework` 13.32 or later.
 
-[Unreleased]: https://github.com/largerio/laravel-concurrency-limit/commits/main
+[Unreleased]: https://github.com/largerio/laravel-concurrency-limit/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/largerio/laravel-concurrency-limit/releases/tag/v1.0.0
