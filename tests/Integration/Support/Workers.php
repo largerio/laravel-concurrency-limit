@@ -4,13 +4,15 @@ declare(strict_types=1);
 
 namespace Largerio\ConcurrencyLimit\Tests\Integration\Support;
 
-use JsonException;
+use Closure;
 use OutOfBoundsException;
 use RuntimeException;
 
 /**
  * Starts copies of bin/worker.php, lets them boot, releases them all at the
- * same instant and collects the line each one prints.
+ * same instant and collects the result each one sends. A worker that sends
+ * no result, or does not exit cleanly after it, fails the test with what it
+ * printed.
  *
  * @phpstan-type Result array{
  *     arrive: float,
@@ -27,7 +29,7 @@ use RuntimeException;
  */
 final class Workers
 {
-    /** @var list<array{process: resource, stdin: resource, stdout: resource, stderr: string}> */
+    /** @var list<WorkerProcess> */
     private array $workers = [];
 
     public private(set) float $startAt = 0.0;
@@ -53,32 +55,23 @@ final class Workers
      */
     public function __construct(int $count, array $options)
     {
-        $command = [PHP_BINARY, __DIR__.'/../bin/worker.php', json_encode($options + [
+        $json = json_encode($options + [
             'block' => 0.0,
             'expire_after' => 60,
             'fail_open' => null,
             'work_ms' => 0,
             'hold' => false,
             'via' => 'pool',
-        ], JSON_THROW_ON_ERROR)];
+        ], JSON_THROW_ON_ERROR);
 
         for ($started = 0; $started < $count; $started++) {
-            $stderr = (string) tempnam(sys_get_temp_dir(), 'concurrency-limit-worker-');
-            $process = proc_open($command, [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $stderr, 'w']], $pipes);
-            $stdin = $pipes[0] ?? null;
-            $stdout = $pipes[1] ?? null;
-
-            if ($process === false || $stdin === null || $stdout === null) {
-                throw new RuntimeException('Could not start a worker.');
-            }
-
-            stream_set_timeout($stdout, 30);
-
-            $this->workers[] = ['process' => $process, 'stdin' => $stdin, 'stdout' => $stdout, 'stderr' => $stderr];
+            $this->workers[] = new WorkerProcess("Worker {$started}", __DIR__.'/../bin/worker.php', $json);
         }
 
         foreach (array_keys($this->workers) as $index) {
-            $this->read($index);
+            $this->on($index, function (WorkerProcess $worker): void {
+                $worker->waitUntilReady();
+            });
         }
     }
 
@@ -100,8 +93,7 @@ final class Workers
         $this->startAt = microtime(true) + 0.05;
 
         foreach ($this->workers as $worker) {
-            fwrite($worker['stdin'], "{$this->startAt}\n");
-            fflush($worker['stdin']);
+            $worker->send("{$this->startAt}\n");
         }
 
         return $this;
@@ -114,8 +106,14 @@ final class Workers
 
         foreach (array_keys($this->workers) as $index) {
             /** @var Result $result */
-            $result = $this->read($index);
+            $result = $this->on($index, fn (WorkerProcess $worker): array => $worker->read());
             $results[] = $result;
+        }
+
+        foreach (array_keys($this->workers) as $index) {
+            $this->on($index, function (WorkerProcess $worker): void {
+                $worker->expectCleanExit();
+            });
         }
 
         $this->kill();
@@ -126,27 +124,25 @@ final class Workers
     /** The time a holding worker took its slot, from inside its critical section. */
     public function heldAt(int $index): float
     {
-        $line = $this->read($index);
+        return $this->on($index, function (WorkerProcess $worker): float {
+            $message = $worker->read();
+            $held = $message['held'] ?? null;
 
-        if (! is_float($line['held'] ?? null)) {
-            $printed = json_encode($line);
+            if (! is_float($held)) {
+                $printed = json_encode($message);
 
-            throw new RuntimeException("Worker {$index} did not hold a slot: {$printed}");
-        }
+                $worker->fail("did not hold a slot: {$printed}");
+            }
 
-        return $line['held'];
+            return $held;
+        });
     }
 
     /** SIGKILLs every worker still running, and waits for it to exit. */
     public function kill(): void
     {
         foreach ($this->workers as $worker) {
-            proc_terminate($worker['process'], SIGKILL);
-            proc_close($worker['process']);
-
-            if (is_file($worker['stderr'])) {
-                unlink($worker['stderr']);
-            }
+            $worker->kill();
         }
 
         $this->workers = [];
@@ -182,28 +178,24 @@ final class Workers
         return $max;
     }
 
-    /** @return array<string, mixed> */
-    private function read(int $index): array
+    /**
+     * Runs a step on one worker; when it fails, the others are killed too.
+     *
+     * @template T
+     *
+     * @param  Closure(WorkerProcess): T  $step
+     * @return T
+     */
+    private function on(int $index, Closure $step): mixed
     {
         $worker = $this->workers[$index] ?? throw new OutOfBoundsException("There is no worker {$index}.");
-        $line = fgets($worker['stdout']);
-
-        if ($line === false) {
-            $stderr = (string) file_get_contents($worker['stderr']);
-            $this->kill();
-
-            throw new RuntimeException("Worker {$index} stopped without a result:\n{$stderr}");
-        }
 
         try {
-            /** @var array<string, mixed> */
-            return json_decode($line, true, flags: JSON_THROW_ON_ERROR);
-        } catch (JsonException) {
-            $stderr = (string) file_get_contents($worker['stderr']);
+            return $step($worker);
+        } catch (RuntimeException $failure) {
             $this->kill();
-            $output = $line.stream_get_contents($worker['stdout']);
 
-            throw new RuntimeException("Worker {$index} printed something other than a JSON line:\n{$output}\nstderr:\n{$stderr}");
+            throw $failure;
         }
     }
 }

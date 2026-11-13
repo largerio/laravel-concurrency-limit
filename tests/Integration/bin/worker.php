@@ -6,7 +6,11 @@ declare(strict_types=1);
  * One process of the multi-process integration suite, driven by
  * Largerio\ConcurrencyLimit\Tests\Integration\Support\Workers.
  *
- * It boots an application on the store under test and prints a "ready" line,
+ * It sends its messages to the driver on file descriptor 3, one JSON line
+ * each, and leaves stdout and stderr to anything else, such as an exception
+ * that Laravel's console handler renders on stdout.
+ *
+ * It boots an application on the store under test and says it is ready,
  * waits for the start time the driver writes on stdin, then does its work
  * under a slot, in one of three ways ("via"):
  *
@@ -16,7 +20,7 @@ declare(strict_types=1);
  * - stream: the same, to a route whose streamed response works while its
  *   body is sent, between the kernel's handle() and terminate().
  *
- * It ends with one JSON line whose timestamps are taken inside the critical
+ * It ends with one result whose timestamps are taken inside the critical
  * section. With "hold", it announces the slot and waits to be killed.
  */
 
@@ -35,17 +39,22 @@ use Largerio\ConcurrencyLimit\Facades\ConcurrencyLimit;
 use Largerio\ConcurrencyLimit\SlotPool;
 use Largerio\ConcurrencyLimit\Slots;
 use Orchestra\Testbench\Foundation\Application;
+use RuntimeException;
 use Symfony\Component\HttpFoundation\Response;
 use Throwable;
 
 require __DIR__.'/../../../vendor/autoload.php';
 
-ini_set('display_errors', 'stderr');
+$messages = fopen('php://fd/3', 'w');
 
-/** @param array<string, mixed> $line */
-$say = function (array $line): void {
-    fwrite(STDOUT, json_encode($line, JSON_THROW_ON_ERROR)."\n");
-    fflush(STDOUT);
+if ($messages === false) {
+    throw new RuntimeException('Start this worker through Workers: it reports on file descriptor 3.');
+}
+
+/** @param array<string, mixed> $message */
+$say = function (array $message) use ($messages): void {
+    fwrite($messages, json_encode($message, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION)."\n");
+    fflush($messages);
 };
 
 /**

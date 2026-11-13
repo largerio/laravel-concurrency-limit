@@ -16,7 +16,8 @@ use Throwable;
 /**
  * A cache store of the integration suite: the configuration that points the
  * driver and its workers at it, a broken variant of that configuration, and
- * the exception the lock driver throws when the store is down (F7).
+ * the exception its lock driver throws when the store is down, which the
+ * package reports as the previous exception of StoreUnavailableException.
  */
 final readonly class StoreUnderTest
 {

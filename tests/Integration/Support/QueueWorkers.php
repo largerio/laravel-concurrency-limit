@@ -4,15 +4,18 @@ declare(strict_types=1);
 
 namespace Largerio\ConcurrencyLimit\Tests\Integration\Support;
 
+use Closure;
 use RuntimeException;
 
 /**
  * Starts copies of bin/queue-worker.php, each one a `queue:work` process,
- * waits until they have booted, and stops them as a deploy would.
+ * waits until they have booted, and stops them as a deploy would. A worker
+ * that does not boot, or does not exit cleanly once stopped, fails the test
+ * with what it printed.
  */
 final class QueueWorkers
 {
-    /** @var list<array{process: resource, stdout: resource, stderr: string}> */
+    /** @var list<WorkerProcess> */
     private array $workers = [];
 
     /**
@@ -25,27 +28,16 @@ final class QueueWorkers
      */
     public function __construct(int $count, array $options)
     {
-        $command = [PHP_BINARY, __DIR__.'/../bin/queue-worker.php', json_encode($options, JSON_THROW_ON_ERROR)];
+        $json = json_encode($options, JSON_THROW_ON_ERROR);
 
         for ($started = 0; $started < $count; $started++) {
-            $id = bin2hex(random_bytes(6));
-            $stderr = sys_get_temp_dir()."/concurrency-limit-queue-worker-{$id}.log";
-            $process = proc_open($command, [0 => ['file', '/dev/null', 'r'], 1 => ['pipe', 'w'], 2 => ['file', $stderr, 'w']], $pipes);
-            $stdout = $pipes[1] ?? null;
-
-            if ($process === false || $stdout === null) {
-                throw new RuntimeException('Could not start a queue worker.');
-            }
-
-            stream_set_timeout($stdout, 30);
-
-            $this->workers[] = ['process' => $process, 'stdout' => $stdout, 'stderr' => $stderr];
+            $this->workers[] = new WorkerProcess("Queue worker {$started}", __DIR__.'/../bin/queue-worker.php', $json);
         }
 
-        foreach ($this->workers as $index => $worker) {
-            if (fgets($worker['stdout']) !== "ready\n") {
-                $this->fail("Queue worker {$index} did not boot", $worker['stderr']);
-            }
+        foreach ($this->workers as $worker) {
+            $this->on($worker, function (WorkerProcess $worker): void {
+                $worker->waitUntilReady();
+            });
         }
     }
 
@@ -56,45 +48,28 @@ final class QueueWorkers
 
     /**
      * Sends SIGTERM, so that each worker finishes its job and exits, and
-     * waits for them.
-     *
-     * @return list<string> what each worker wrote to stderr
+     * waits for them: each one exits with 0 and leaves stdout empty.
      */
-    public function stop(): array
+    public function stop(): void
     {
         foreach ($this->workers as $worker) {
-            proc_terminate($worker['process'], SIGTERM);
+            $worker->terminate();
         }
 
-        $deadline = microtime(true) + 30;
-
-        foreach ($this->workers as $index => $worker) {
-            while (proc_get_status($worker['process'])['running']) {
-                if (microtime(true) > $deadline) {
-                    $this->fail("Queue worker {$index} did not stop", $worker['stderr']);
-                }
-
-                usleep(20_000);
-            }
+        foreach ($this->workers as $worker) {
+            $this->on($worker, function (WorkerProcess $worker): void {
+                $worker->expectCleanExit();
+            });
         }
-
-        $stderr = array_map(fn (array $worker): string => (string) file_get_contents($worker['stderr']), $this->workers);
 
         $this->kill();
-
-        return $stderr;
     }
 
     /** SIGKILLs every worker still running, and waits for it to exit. */
     public function kill(): void
     {
         foreach ($this->workers as $worker) {
-            proc_terminate($worker['process'], SIGKILL);
-            proc_close($worker['process']);
-
-            if (is_file($worker['stderr'])) {
-                unlink($worker['stderr']);
-            }
+            $worker->kill();
         }
 
         $this->workers = [];
@@ -128,12 +103,19 @@ final class QueueWorkers
         return $max;
     }
 
-    private function fail(string $message, string $stderr): never
+    /**
+     * Runs a step on one worker; when it fails, the others are killed too.
+     *
+     * @param  Closure(WorkerProcess): void  $step
+     */
+    private function on(WorkerProcess $worker, Closure $step): void
     {
-        $output = (string) file_get_contents($stderr);
+        try {
+            $step($worker);
+        } catch (RuntimeException $failure) {
+            $this->kill();
 
-        $this->kill();
-
-        throw new RuntimeException("{$message}:\n{$output}");
+            throw $failure;
+        }
     }
 }

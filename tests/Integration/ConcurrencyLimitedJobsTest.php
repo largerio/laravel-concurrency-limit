@@ -64,7 +64,7 @@ it('never runs more jobs at once than the limit, across queue workers', function
         // Long enough for a job handled twice to show up.
         usleep(500_000);
 
-        $stderr = $workers->stop();
+        $workers->stop();
         $runs = overlapProbeRuns($log, 20, timeout: 0);
         $handled = array_count_values(array_column($runs, 'number'));
         ksort($handled);
@@ -73,8 +73,7 @@ it('never runs more jobs at once than the limit, across queue workers', function
             ->and(QueueWorkers::maxOverlap($runs))->toBeLessThanOrEqual(2)
             ->and(max(array_column($runs, 'attempts')))->toBeGreaterThan(1)
             ->and((int) $pdo->query('SELECT COUNT(*) FROM failed_jobs')->fetchColumn())->toBe(0)
-            ->and(Queue::connection('redis')->size($queue))->toBe(0)
-            ->and($stderr)->each->toBe('');
+            ->and(Queue::connection('redis')->size($queue))->toBe(0);
     } finally {
         $workers->kill();
         Queue::connection('redis')->clear($queue);
