@@ -7,10 +7,13 @@ parameters:
     level: max
     # Pest test files are left out: Pest's API is resolved through __call on
     # @internal classes, which no analyser can type. Plain PHP under tests/
-    # (base test case, fixtures, integration worker) is analysed.
+    # (base test case, fixtures, integration worker and harness) is analysed.
     paths:
         - config
         - src
+        - tests/Fixtures
+        - tests/Integration/bin
+        - tests/Integration/Support
         - tests/TestCase.php
     tmpDir: build/phpstan
 
