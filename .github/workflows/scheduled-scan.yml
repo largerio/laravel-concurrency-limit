@@ -1,0 +1,91 @@
+name: Scheduled security scan
+
+# CI only looks at a commit when it lands. Every week, this resolves the
+# dependencies again, as a new install of the package would, audits them, and
+# scans the history for secrets, so an advisory published in a quiet week
+# still turns up, as an issue.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Audit dependencies
+        run: composer audit
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Same version and checksum as ci.yml: bump them together.
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+
+      - name: Scan git history for leaked secrets
+        run: gitleaks git . --redact --no-banner --verbose
+
+  report:
+    needs: [audit, secrets]
+    if: failure()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the tracking issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # --force creates the label or updates it, so it never fails on an
+          # existing one.
+          gh label create security --force \
+            --color d73a4a \
+            --description "Found by the scheduled security scan"
+
+          existing=$(gh issue list --label security --state open \
+            --search "Scheduled security scan in:title" \
+            --json number --jq '.[0].number // empty')
+
+          body="The weekly scan failed: an advisory against a dependency, a secret in the history, or a scan that could not run. See the run: ${RUN_URL}"
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+          else
+            gh issue create --title "Scheduled security scan found a problem" \
+              --label security --body "$body"
+          fi

@@ -1,0 +1,69 @@
+name: Dependabot delayed merge
+
+# Arms auto-merge on the Dependabot PRs labeled auto-merge-48h
+# (dependabot-label.yml) that are at least 48 hours old, so a compromised
+# release has time to be yanked, and already green. The merge itself still
+# waits for the required checks of main's branch protection.
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      # `secrets` is not available to a step-level `if`, but it is here.
+      HAS_RELEASE_APP: ${{ vars.APP_CLIENT_ID != '' && secrets.APP_PRIVATE_KEY != '' }}
+    steps:
+      # GitHub starts no workflow for a push made with GITHUB_TOKEN: a merge
+      # armed with it would reach main with no CI run. Armed as a GitHub App,
+      # it gets one. The PRs that change .github/ are left to a human, below.
+      - name: Mint a GitHub App token
+        id: app-token
+        if: env.HAS_RELEASE_APP == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.APP_CLIENT_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Arm auto-merge on the eligible PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          # Only the merge needs the App. Without it (a fork), merges fall
+          # back to GITHUB_TOKEN and skip CI on main.
+          MERGE_TOKEN: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
+        run: |
+          cutoff=$(date -u -d '48 hours ago' +%s)
+          gh pr list --state open --author "app/dependabot" \
+            --label auto-merge-48h --json number,createdAt,files \
+            --jq '.[] | "\(.number) \(.createdAt) \([.files[].path | select(startswith(".github/"))] | length)"' |
+          while read -r number created workflows; do
+            [ -n "$number" ] || continue
+            created_ts=$(date -u -d "$created" +%s)
+            [ "$created_ts" -le "$cutoff" ] || continue
+            if [ "$workflows" -gt 0 ]; then
+              echo "Skipping PR #$number: it changes .github/, review it by hand"
+              continue
+            fi
+            # gh pr checks exits non-zero while any check is pending or failing.
+            if gh pr checks "$number"; then
+              echo "Arming auto-merge for PR #$number"
+              GH_TOKEN="$MERGE_TOKEN" gh pr merge "$number" --auto --squash
+            else
+              echo "Skipping PR #$number: checks not green yet"
+            fi
+          done

@@ -1,0 +1,88 @@
+version: 2
+updates:
+  # The ranges of composer.json. A library ships no lock file, so CI already
+  # resolves the newest versions in range (and the lowest, in the
+  # prefer-lowest jobs): Dependabot has something to propose only once a
+  # release falls outside a range. It widens the range rather than raising
+  # its floor, which would drop versions applications may still run.
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+    versioning-strategy: widen
+    # Proposes no version published less than three days ago.
+    cooldown:
+      default-days: 3
+    groups:
+      dependencies:
+        patterns: ["*"]
+        # Group only patch/minor; major bumps come as separate PRs and are
+        # never auto-merged (see .github/workflows/dependabot-label.yml).
+        update-types:
+          - minor
+          - patch
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: deps
+    labels: ["dependencies"]
+
+  # Base images of Dockerfile.dev, pinned by tag and digest. Their bumps are
+  # labeled auto-merge-48h (dependabot-label.yml).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      # Each php-* stage stays on its PHP minor: the 8.4 stage moving to 8.5
+      # would drop a supported version from `make matrix`.
+      - dependency-name: php
+        update-types: ["version-update:semver-minor"]
+      # A new major is a change of its own, not a bump: every docker PR is
+      # then a patch, minor or digest bump.
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      # No update-types: a digest bump keeps the tag, so it is neither minor
+      # nor patch, and would otherwise fall to an ungrouped update.
+      docker:
+        patterns: ["*"]
+    commit-message:
+      prefix: build
+    labels: ["docker"]
+
+  # The stores and tools of docker-compose.dev.yml, which CI also runs as its
+  # service containers. Labeled auto-merge-48h like the base images.
+  - package-ecosystem: docker-compose
+    directory: /
+    schedule:
+      interval: weekly
+    ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-major"]
+    groups:
+      docker-compose:
+        patterns: ["*"]
+    commit-message:
+      prefix: build
+    labels: ["docker"]
+
+  # Actions pinned by commit SHA in .github/workflows/*.yml, and in the local
+  # composite actions, which Dependabot only reads from the directories listed.
+  # Never auto-merged: an action runs with the workflow's tokens.
+  - package-ecosystem: github-actions
+    directories:
+      - /
+      - /.github/actions/*
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 3
+    groups:
+      actions:
+        patterns: ["*"]
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: ci
+    labels: ["github-actions"]

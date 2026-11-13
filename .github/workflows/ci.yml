@@ -1,0 +1,291 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # composer validate --strict, Pint and Rector in dry-run.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Lint
+        run: composer lint
+
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Analyse
+        run: composer analyse
+
+  # Both ends of every range composer.json allows, on each supported PHP. The
+  # integration group needs Redis and Memcached: the integration job runs it.
+  test:
+    name: test (PHP ${{ matrix.php }}, ${{ matrix.dependencies }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.4", "8.5"]
+        dependencies: [prefer-lowest, prefer-stable]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          php-version: ${{ matrix.php }}
+          composer-args: --${{ matrix.dependencies }}
+
+      - name: Test
+        run: vendor/bin/pest --exclude-group=integration
+
+  # The integration and coverage jobs run the stores of docker-compose.dev.yml,
+  # where Dependabot keeps them up to date. Read from there rather than copied
+  # here, CI cannot drift from what `make test` runs.
+  images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      redis: ${{ steps.read.outputs.redis }}
+      memcached: ${{ steps.read.outputs.memcached }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the images of the stores
+        id: read
+        run: |
+          for service in redis memcached; do
+            image=$(yq ".services.$service.image" docker-compose.dev.yml)
+            # Pinned by tag and digest, like every image of the repository.
+            if ! [[ "$image" =~ ^[a-z0-9._/-]+:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error file=docker-compose.dev.yml::The $service image is not pinned by tag and digest: $image"
+              exit 1
+            fi
+            echo "$service=$image" >> "$GITHUB_OUTPUT"
+          done
+
+  # Real processes against real stores: the multi-process suite. Once on the
+  # newest versions, once on the lowest Laravel composer.json allows.
+  integration:
+    name: integration (PHP ${{ matrix.php }}, Laravel ${{ matrix.laravel || 'latest' }})
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - php: "8.5"
+            laravel: ""
+          - php: "8.4"
+            laravel: "13.0.*"
+    # Hardened as in docker-compose.dev.yml: no capabilities, no privilege
+    # escalation, read-only root filesystem, Redis as its own user.
+    services:
+      redis:
+        image: ${{ needs.images.outputs.redis }}
+        ports: ["6379:6379"]
+        options: >-
+          --user redis --cap-drop ALL --security-opt no-new-privileges --read-only
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 15
+      memcached:
+        image: ${{ needs.images.outputs.memcached }}
+        ports: ["11211:11211"]
+        options: >-
+          --cap-drop ALL --security-opt no-new-privileges --read-only
+          --health-cmd "nc -z 127.0.0.1 11211" --health-interval 2s --health-timeout 3s --health-retries 15
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      MEMCACHED_HOST: 127.0.0.1
+      MEMCACHED_PORT: 11211
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          php-version: ${{ matrix.php }}
+          laravel: ${{ matrix.laravel }}
+
+      - name: Test the integration group
+        run: vendor/bin/pest --group=integration
+
+  # The whole suite, integration group included: below 100% of the lines of
+  # src/, the job fails.
+  coverage:
+    needs: images
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      redis:
+        image: ${{ needs.images.outputs.redis }}
+        ports: ["6379:6379"]
+        options: >-
+          --user redis --cap-drop ALL --security-opt no-new-privileges --read-only
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 3s --health-retries 15
+      memcached:
+        image: ${{ needs.images.outputs.memcached }}
+        ports: ["11211:11211"]
+        options: >-
+          --cap-drop ALL --security-opt no-new-privileges --read-only
+          --health-cmd "nc -z 127.0.0.1 11211" --health-interval 2s --health-timeout 3s --health-retries 15
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+      MEMCACHED_HOST: 127.0.0.1
+      MEMCACHED_PORT: 11211
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+        with:
+          coverage: pcov
+
+      - name: Test with coverage
+        run: composer coverage
+
+  # Composer installs the package from GitHub's archive of a tag, which leaves
+  # out every path .gitattributes marks export-ignore. A file left unmarked
+  # would ship to every application; a marked one, missing from it.
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: "8.5"
+          coverage: none
+          tools: composer:v2
+
+      - name: Validate composer.json
+        run: composer validate --strict
+
+      - name: Check what the archive holds
+        run: |
+          files=$(git archive --format=tar HEAD | tar -tf - | grep -v '/$' | sort)
+          echo "$files"
+
+          unexpected=$(grep -Ev '^(src/|config/|composer\.json$|README\.md$|CHANGELOG\.md$|LICENSE\.md$)' <<< "$files" || true)
+          if [ -n "$unexpected" ]; then
+            echo "::error::The archive holds files outside the package; mark them export-ignore in .gitattributes:"
+            echo "$unexpected"
+            exit 1
+          fi
+
+          for expected in composer.json README.md CHANGELOG.md LICENSE.md src/ config/; do
+            if ! grep -q "^$expected" <<< "$files"; then
+              echo "::error::$expected is missing from the archive"
+              exit 1
+            fi
+          done
+
+  # Advisories against the versions resolved above, the newest in range: a
+  # library ships no lock file, so this is what a new install gets.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup
+
+      - name: Audit dependencies
+        run: composer audit
+
+  secrets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # The CLI, not gitleaks-action: the action needs a paid license for an
+      # organization's repositories. Not tracked by Dependabot: bump the
+      # version and the checksum (from the release's _checksums.txt) together,
+      # with the image in docker-compose.dev.yml.
+      # https://github.com/gitleaks/gitleaks/releases
+      - name: Install gitleaks
+        env:
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+        run: |
+          curl -sSfL --retry 5 --retry-all-errors --retry-delay 3 --connect-timeout 15 \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" -o gitleaks.tar.gz
+          echo "${GITLEAKS_SHA256}  gitleaks.tar.gz" | sha256sum -c -
+          tar -xzf gitleaks.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+
+      - name: Scan git history for leaked secrets
+        run: gitleaks git . --redact --no-banner --verbose
+
+  # A workflow file GitHub cannot parse runs nothing and reports no failure.
+  workflows:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Not tracked by Dependabot: bump the version and the digest together.
+      - name: Lint the workflows
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667

@@ -1,0 +1,53 @@
+name: Set up PHP and the dependencies
+description: >
+  Install PHP with the extensions of Dockerfile.dev and Composer 2, then
+  resolve the dependencies. The package ships no lock file, so this is
+  `composer update`: the newest versions in range, or the lowest with
+  --prefer-lowest.
+
+inputs:
+  php-version:
+    description: The PHP version.
+    required: false
+    default: "8.5"
+  coverage:
+    description: The coverage driver, `pcov` or `none`.
+    required: false
+    default: none
+  laravel:
+    description: A constraint on laravel/framework, such as `13.0.*`; empty for none.
+    required: false
+    default: ""
+  composer-args:
+    description: Arguments added to `composer update`, such as `--prefer-lowest`.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # pcov for coverage, redis (phpredis) and memcached for the stores under
+    # test, pcntl for the multi-process integration suite. pdo_sqlite is part
+    # of the default set.
+    - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+      with:
+        php-version: ${{ inputs.php-version }}
+        extensions: pcov, redis, memcached, pcntl
+        coverage: ${{ inputs.coverage }}
+        tools: composer:v2
+
+    # A dev requirement, so laravel/framework stays out of what the package
+    # itself requires.
+    - name: Constrain Laravel
+      if: inputs.laravel != ''
+      shell: bash
+      env:
+        LARAVEL: ${{ inputs.laravel }}
+      run: composer require --dev --no-update --no-interaction "laravel/framework:$LARAVEL"
+
+    - name: Install dependencies
+      shell: bash
+      env:
+        COMPOSER_ARGS: ${{ inputs.composer-args }}
+      # Unquoted: a list of arguments.
+      run: composer update --prefer-dist --no-interaction --no-progress $COMPOSER_ARGS
