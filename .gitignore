@@ -1,0 +1,16 @@
+# Dependencies (a library ships no lock file: composer.json sets "lock": false)
+/vendor/
+/composer.lock
+
+# Tool caches, coverage reports and the per-version vendors of `make matrix`
+/build/
+
+# Local overrides of the .dist configs
+/phpstan.neon
+/phpunit.xml
+
+# Editors and OS
+/.fleet/
+/.idea/
+/.vscode/
+.DS_Store

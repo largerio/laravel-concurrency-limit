@@ -1,0 +1,16 @@
+# Larastan, strict rules and deprecation rules are loaded by
+# phpstan/extension-installer. The minimum PHP version is read from composer.json.
+parameters:
+    level: 9
+    paths:
+        - config
+        - src
+    tmpDir: build/phpstan
+    checkOctaneCompatibility: true
+    ignoreErrors:
+        # The package's config file is merged into the application's config,
+        # where env() is allowed; Larastan only recognises the application's
+        # config directory.
+        -
+            identifier: larastan.noEnvCallsOutsideOfConfig
+            path: config/concurrency-limit.php
