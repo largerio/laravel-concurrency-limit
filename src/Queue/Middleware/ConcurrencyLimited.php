@@ -14,9 +14,11 @@ use Illuminate\Queue\Jobs\SyncJob;
 use Illuminate\Support\InteractsWithTime;
 use InvalidArgumentException;
 use Largerio\ConcurrencyLimit\Exceptions\ConcurrencyLimitExceededException;
+use Largerio\ConcurrencyLimit\Exceptions\JobConcurrencyLimitExceededException;
 use Largerio\ConcurrencyLimit\Exceptions\StoreUnavailableException;
 use Largerio\ConcurrencyLimit\SlotPool;
 use Largerio\ConcurrencyLimit\Slots;
+use Throwable;
 use UnitEnum;
 
 /**
@@ -75,24 +77,21 @@ final class ConcurrencyLimited
     /**
      * @param  Closure(object): mixed  $next
      *
-     * @throws ConcurrencyLimitExceededException when no slot is free and the job has no queue to go back to
+     * @throws JobConcurrencyLimitExceededException when no slot is free and the job has no queue to go back to
      */
     public function handle(object $job, Closure $next): mixed
     {
         $pool = Container::getInstance()->make(SlotPool::class);
         $queueJob = $this->queueJobOf($job);
         $slots = $this->slotsFor($queueJob);
+        $limiter = $this->limiterFor($job);
 
         try {
-            $leases = $pool->acquire($this->limiterFor($job), [$slots]);
-        } catch (ConcurrencyLimitExceededException $exception) {
-            $this->postpone($queueJob, $exception);
-
-            return null;
-        } catch (StoreUnavailableException) {
-            // Failing closed. The pool has reported the failure: rethrowing
-            // it would report it twice and burn an attempt.
-            $this->postpone($queueJob, new ConcurrencyLimitExceededException($slots));
+            $leases = $pool->acquire($limiter, [$slots]);
+        } catch (ConcurrencyLimitExceededException|StoreUnavailableException $exception) {
+            // Failing closed, the pool has reported the store failure:
+            // rethrowing it would report it twice and burn an attempt.
+            $this->postpone($queueJob, $limiter, $slots, $exception);
 
             return null;
         }
@@ -124,7 +123,13 @@ final class ConcurrencyLimited
 
     public function expireAfter(DateTimeInterface|int $expiresAfter): self
     {
-        $this->expiresAfter = $this->secondsUntil($expiresAfter);
+        $seconds = $this->secondsUntil($expiresAfter);
+
+        if ($seconds < 1) {
+            throw new InvalidArgumentException("Slots must expire after at least 1 second, got {$seconds}.");
+        }
+
+        $this->expiresAfter = $seconds;
 
         return $this;
     }
@@ -170,14 +175,15 @@ final class ConcurrencyLimited
 
     /**
      * Releases the job, or skips it with dontRelease(). A job that has no
-     * queue to go back to would be lost either way, so it gets the exception.
+     * queue to go back to, whatever its connection, would be lost either
+     * way: it throws an exception the exception handler reports.
      *
-     * @throws ConcurrencyLimitExceededException
+     * @throws JobConcurrencyLimitExceededException
      */
-    private function postpone(?Job $queueJob, ConcurrencyLimitExceededException $exception): void
+    private function postpone(?Job $queueJob, string $limiter, Slots $slots, Throwable $reason): void
     {
         if (! $queueJob instanceof Job || $queueJob instanceof SyncJob) {
-            throw $exception;
+            throw new JobConcurrencyLimitExceededException($limiter, $slots, $reason);
         }
 
         if ($this->releaseAfter === null) {

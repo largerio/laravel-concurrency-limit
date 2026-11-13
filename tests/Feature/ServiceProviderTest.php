@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Illuminate\Auth\Middleware\AuthenticateWithBasicAuth;
 use Illuminate\Config\Repository;
 use Illuminate\Container\Container;
 use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
@@ -88,12 +89,13 @@ it('registers the concurrency middleware alias', function (): void {
     expect(app('router')->getMiddleware())->toHaveKey('concurrency', LimitConcurrentRequests::class);
 });
 
-it('places the middleware after authentication and rate limiting, before route model binding', function (): void {
+it('places the middleware after authentication, basic authentication included, and rate limiting, before route model binding', function (): void {
     $priority = app(HttpKernel::class)->getMiddlewarePriority();
     $position = array_search(LimitConcurrentRequests::class, $priority, true);
 
-    expect(array_slice($priority, (int) $position - 3, 6))->toBe([
+    expect(array_slice($priority, (int) $position - 4, 7))->toBe([
         AuthenticatesRequests::class,
+        AuthenticateWithBasicAuth::class,
         ThrottleRequests::class,
         ThrottleRequestsWithRedis::class,
         LimitConcurrentRequests::class,
@@ -108,18 +110,22 @@ describe('an application that sets its own middleware priority', function (): vo
     })->with([
         'authentication, then rate limiting' => [
             [StartSession::class, AuthenticatesRequests::class, ThrottleRequests::class, SubstituteBindings::class],
-            [StartSession::class, AuthenticatesRequests::class, ThrottleRequests::class, LimitConcurrentRequests::class, SubstituteBindings::class],
+            [StartSession::class, AuthenticatesRequests::class, AuthenticateWithBasicAuth::class, ThrottleRequests::class, LimitConcurrentRequests::class, SubstituteBindings::class],
         ],
         'route model binding before authentication' => [
             [StartSession::class, ThrottleRequests::class, SubstituteBindings::class, AuthenticatesRequests::class],
-            [StartSession::class, ThrottleRequests::class, SubstituteBindings::class, AuthenticatesRequests::class, LimitConcurrentRequests::class],
+            [StartSession::class, ThrottleRequests::class, SubstituteBindings::class, AuthenticatesRequests::class, AuthenticateWithBasicAuth::class, LimitConcurrentRequests::class],
+        ],
+        'basic authentication placed by the application' => [
+            [AuthenticatesRequests::class, ThrottleRequests::class, AuthenticateWithBasicAuth::class, SubstituteBindings::class],
+            [AuthenticatesRequests::class, ThrottleRequests::class, AuthenticateWithBasicAuth::class, LimitConcurrentRequests::class, SubstituteBindings::class],
         ],
     ])->with([
         'kernel resolved before the providers boot' => true,
         'kernel resolved after the providers boot' => false,
     ]);
 
-    it('appends the middleware to a list without authentication or rate limiting', function (bool $kernelResolvedFirst): void {
+    it('appends the middleware to a list without authentication or rate limiting, and leaves basic authentication out of it', function (bool $kernelResolvedFirst): void {
         expect(priorityOfAnApplicationWith([StartSession::class, SubstituteBindings::class], $kernelResolvedFirst))
             ->toBe([StartSession::class, SubstituteBindings::class, LimitConcurrentRequests::class]);
     })->with([
@@ -130,7 +136,8 @@ describe('an application that sets its own middleware priority', function (): vo
     it('keeps the place the list gives the middleware', function (bool $kernelResolvedFirst): void {
         $priority = [LimitConcurrentRequests::class, AuthenticatesRequests::class, ThrottleRequests::class];
 
-        expect(priorityOfAnApplicationWith($priority, $kernelResolvedFirst))->toBe($priority);
+        expect(priorityOfAnApplicationWith($priority, $kernelResolvedFirst))
+            ->toBe([LimitConcurrentRequests::class, AuthenticatesRequests::class, AuthenticateWithBasicAuth::class, ThrottleRequests::class]);
     })->with([
         'kernel resolved before the providers boot' => true,
         'kernel resolved after the providers boot' => false,

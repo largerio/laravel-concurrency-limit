@@ -36,7 +36,7 @@ function useStore(Store $store): void
 
 function slotName(string $limiter, string $key, int $slot): string
 {
-    $pool = hash('xxh128', json_encode([$limiter, $key], JSON_THROW_ON_ERROR));
+    $pool = hash('xxh128', serialize([$limiter, $key]));
 
     return "concurrency:{$pool}:{$slot}";
 }

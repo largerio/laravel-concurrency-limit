@@ -19,10 +19,12 @@ use Largerio\ConcurrencyLimit\Facades\ConcurrencyLimit;
 use Largerio\ConcurrencyLimit\Http\Middleware\LimitConcurrentRequests;
 use Largerio\ConcurrencyLimit\Slots;
 use Largerio\ConcurrencyLimit\Tests\Fixtures\Admin;
+use Largerio\ConcurrencyLimit\Tests\Fixtures\BasicAuthUserProvider;
 use Largerio\ConcurrencyLimit\Tests\Fixtures\ThrowingOnReleaseStore;
 use Largerio\ConcurrencyLimit\Tests\Fixtures\ThrowingStore;
 use Largerio\ConcurrencyLimit\Tests\Fixtures\User;
 use Symfony\Component\HttpFoundation\Response;
+use Symfony\Component\HttpFoundation\StreamedResponse;
 use Symfony\Component\HttpKernel\Exception\ServiceUnavailableHttpException;
 
 /** The number of slots held right now, on the array store. */
@@ -46,8 +48,12 @@ function fillPool(string $limiter, string $key, int $max = 1): void
 function sendBody(Response $response): void
 {
     ob_start(fn (): string => '');
-    $response->sendContent();
-    ob_end_clean();
+
+    try {
+        $response->sendContent();
+    } finally {
+        ob_end_clean();
+    }
 }
 
 describe('admitting', function (): void {
@@ -329,7 +335,8 @@ describe('default key', function (): void {
 });
 
 describe('streamed and file responses', function (): void {
-    it('keeps the slot after handle() and frees it in terminate()', function (Closure $respond): void {
+    it('keeps the slot after handle() and frees it once, by the end of the request', function (Closure $respond): void {
+        Event::fake([SlotReleased::class]);
         ConcurrencyLimit::for('downloads', fn (): Slots => Slots::max(1));
         Route::get('/download', $respond)->middleware('concurrency:downloads');
         $kernel = app(HttpKernel::class);
@@ -343,6 +350,7 @@ describe('streamed and file responses', function (): void {
         $kernel->terminate($request, $response);
 
         expect(slotsHeld())->toBe(0);
+        Event::assertDispatchedTimes(SlotReleased::class, 1);
     })->with([
         'a stream' => [fn (): Response => response()->stream(fn (): int => print 'row')],
         'a JSON stream' => [fn (): Response => response()->streamJson(['rows' => LazyCollection::make(fn () => yield 'row')])],
@@ -368,6 +376,119 @@ describe('streamed and file responses', function (): void {
 
         expect($heldWhileStreaming)->toBe(1)
             ->and(slotsHeld())->toBe(0);
+    });
+
+    it('frees the slot of a stream as soon as its body is sent', function (Closure $respond): void {
+        ConcurrencyLimit::for('downloads', fn (): Slots => Slots::max(1));
+        Route::get('/download', $respond)->middleware('concurrency:downloads');
+
+        $response = app(HttpKernel::class)->handle(Request::create('/download'));
+        sendBody($response);
+
+        expect(slotsHeld())->toBe(0);
+    })->with([
+        'a stream' => [fn (): Response => response()->stream(fn (): int => print 'row')],
+        'a JSON stream' => [fn (): Response => response()->streamJson(['rows' => LazyCollection::make(fn () => yield 'row')])],
+        'an event stream' => [fn (): Response => response()->eventStream(fn () => yield 'tick')],
+        'a streamed download' => [fn (): Response => response()->streamDownload(fn (): int => print 'row', 'report.csv')],
+    ]);
+
+    it('frees the slot once when the body of a stream throws, though the kernel then never terminates', function (Closure $respond): void {
+        Event::fake([SlotReleased::class]);
+        ConcurrencyLimit::for('downloads', fn (): Slots => Slots::max(1));
+        Route::get('/download', $respond)->middleware('concurrency:downloads');
+        $kernel = app(HttpKernel::class);
+
+        $response = $kernel->handle($request = Request::create('/download'));
+
+        expect(fn () => sendBody($response))->toThrow(RuntimeException::class);
+
+        expect(slotsHeld())->toBe(0);
+
+        $kernel->terminate($request, $response);
+
+        Event::assertDispatchedTimes(SlotReleased::class, 1);
+    })->with([
+        'a stream' => [fn (): Response => response()->stream(fn (): never => throw new RuntimeException('Export failed'))],
+        'a JSON stream' => [fn (): Response => response()->streamJson(['rows' => LazyCollection::make(function () {
+            yield 'row';
+
+            throw new RuntimeException('Export failed');
+        })])],
+        'a streamed download' => [fn (): Response => response()->streamDownload(fn (): never => throw new RuntimeException('Export failed'), 'report.csv')],
+    ]);
+
+    it('frees in terminate() the slot of a stream that was never sent', function (Closure $respond): void {
+        Event::fake([SlotReleased::class]);
+        ConcurrencyLimit::for('downloads', fn (): Slots => Slots::max(1));
+        Route::get('/download', $respond)->middleware('concurrency:downloads');
+        $kernel = app(HttpKernel::class);
+
+        $response = $kernel->handle($request = Request::create('/download'));
+        $kernel->terminate($request, $response);
+
+        expect(slotsHeld())->toBe(0);
+        Event::assertDispatchedTimes(SlotReleased::class, 1);
+    })->with([
+        'a stream' => [fn (): Response => response()->stream(fn (): int => print 'row')],
+        'a stream given its callback later' => [fn (): Response => new StreamedResponse],
+    ]);
+
+    describe('under Octane, which streams the generator of a stream itself', function (): void {
+        beforeEach(function (): void {
+            $_SERVER['LARAVEL_OCTANE'] = 1;
+        });
+
+        afterEach(function (): void {
+            unset($_SERVER['LARAVEL_OCTANE']);
+        });
+
+        it('keeps the generator a generator, and frees the slot once it is consumed', function (): void {
+            Event::fake([SlotReleased::class]);
+            ConcurrencyLimit::for('downloads', fn (): Slots => Slots::max(1));
+            $heldWhileStreaming = null;
+            Route::get('/download', function () use (&$heldWhileStreaming): Response {
+                return response()->stream(function () use (&$heldWhileStreaming) {
+                    $heldWhileStreaming = slotsHeld();
+
+                    yield 'row';
+                });
+            })->middleware('concurrency:downloads');
+            $kernel = app(HttpKernel::class);
+
+            $response = $kernel->handle($request = Request::create('/download'));
+            $stream = $response->getCallback();
+
+            expect(new ReflectionFunction($stream)->isGenerator())->toBeTrue()
+                ->and(iterator_to_array($stream()))->toBe(['row'])
+                ->and($heldWhileStreaming)->toBe(1)
+                ->and(slotsHeld())->toBe(0);
+
+            $kernel->terminate($request, $response);
+
+            Event::assertDispatchedTimes(SlotReleased::class, 1);
+        });
+
+        it('frees the slot once when the generator throws', function (): void {
+            Event::fake([SlotReleased::class]);
+            ConcurrencyLimit::for('downloads', fn (): Slots => Slots::max(1));
+            Route::get('/download', fn (): Response => response()->stream(function () {
+                yield 'row';
+
+                throw new RuntimeException('Export failed');
+            }))->middleware('concurrency:downloads');
+            $kernel = app(HttpKernel::class);
+
+            $response = $kernel->handle($request = Request::create('/download'));
+            $stream = $response->getCallback();
+
+            expect(fn (): array => iterator_to_array($stream()))->toThrow(RuntimeException::class, 'Export failed')
+                ->and(slotsHeld())->toBe(0);
+
+            $kernel->terminate($request, $response);
+
+            Event::assertDispatchedTimes(SlotReleased::class, 1);
+        });
     });
 
     it('frees the slots of every limiter on the route once', function (): void {
@@ -503,6 +624,18 @@ describe('middleware priority', function (): void {
         Route::get('/reports', fn (): string => 'ok')->middleware(['concurrency:reports', 'auth:users']);
 
         $this->get('/reports', ['X-User' => '1'])->assertOk();
+
+        Event::assertDispatched(SlotAcquired::class, fn (SlotAcquired $event): bool => $event->key === User::class.':1');
+    });
+
+    it('runs after basic authentication, whatever the order on the route', function (): void {
+        Event::fake([SlotAcquired::class]);
+        Auth::provider('basic-users', fn (): BasicAuthUserProvider => new BasicAuthUserProvider);
+        config(['auth.providers.basic-users' => ['driver' => 'basic-users'], 'auth.guards.web.provider' => 'basic-users']);
+        ConcurrencyLimit::for('reports', fn (): Slots => Slots::max(1));
+        Route::get('/reports', fn (): string => 'ok')->middleware(['concurrency:reports', 'auth.basic']);
+
+        $this->get('/reports', ['Authorization' => 'Basic '.base64_encode('ada@example.com:secret')])->assertOk();
 
         Event::assertDispatched(SlotAcquired::class, fn (SlotAcquired $event): bool => $event->key === User::class.':1');
     });

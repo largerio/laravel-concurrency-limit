@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Largerio\ConcurrencyLimit\Http\Middleware;
 
 use Closure;
+use Generator;
 use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Contracts\Container\Container;
 use Illuminate\Http\Request;
@@ -14,6 +15,7 @@ use Largerio\ConcurrencyLimit\Exceptions\StoreUnavailableException;
 use Largerio\ConcurrencyLimit\Lease;
 use Largerio\ConcurrencyLimit\SlotPool;
 use Largerio\ConcurrencyLimit\Slots;
+use ReflectionFunction;
 use Symfony\Component\HttpFoundation\BinaryFileResponse;
 use Symfony\Component\HttpFoundation\Response;
 use Symfony\Component\HttpFoundation\StreamedResponse;
@@ -79,8 +81,15 @@ final readonly class LimitConcurrentRequests
             throw $exception;
         }
 
-        if ($response instanceof StreamedResponse || $response instanceof BinaryFileResponse) {
-            $request->attributes->set(self::LEASES, [...$this->leasesOf($request), ...$leases]);
+        if ($response instanceof StreamedResponse) {
+            $this->holdUntilTerminated($request, $leases);
+            $this->releaseWhenStreamed($request, $response);
+
+            return $response;
+        }
+
+        if ($response instanceof BinaryFileResponse) {
+            $this->holdUntilTerminated($request, $leases);
 
             return $response;
         }
@@ -96,6 +105,53 @@ final readonly class LimitConcurrentRequests
      * plays no part.
      */
     public function terminate(Request $request): void
+    {
+        $this->releaseHeld($request);
+    }
+
+    /** @param  list<Lease>  $leases */
+    private function holdUntilTerminated(Request $request, array $leases): void
+    {
+        $request->attributes->set(self::LEASES, [...$this->leasesOf($request), ...$leases]);
+    }
+
+    /**
+     * A body that throws stops Response::send() before the kernel
+     * terminates, so the stream frees the slots itself once it ends;
+     * terminate() still frees those of a stream that is never sent. The
+     * slots are freed once, by whichever comes first. A generator stays a
+     * generator, as Octane streams it itself.
+     */
+    private function releaseWhenStreamed(Request $request, StreamedResponse $response): void
+    {
+        $stream = $response->getCallback();
+
+        if (! $stream instanceof Closure) {
+            return;
+        }
+
+        if (new ReflectionFunction($stream)->isGenerator()) {
+            $response->setCallback(function () use ($stream, $request): Generator {
+                try {
+                    yield from $stream();
+                } finally {
+                    $this->releaseHeld($request);
+                }
+            });
+
+            return;
+        }
+
+        $response->setCallback(function () use ($stream, $request): void {
+            try {
+                $stream();
+            } finally {
+                $this->releaseHeld($request);
+            }
+        });
+    }
+
+    private function releaseHeld(Request $request): void
     {
         $leases = $this->leasesOf($request);
 

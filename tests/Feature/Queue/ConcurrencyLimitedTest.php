@@ -5,7 +5,9 @@ declare(strict_types=1);
 use Illuminate\Bus\Dispatcher;
 use Illuminate\Events\CallQueuedListener;
 use Illuminate\Queue\CallQueuedHandler;
+use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Jobs\FakeJob;
+use Illuminate\Support\Defer\DeferredCallbackCollection;
 use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
@@ -14,6 +16,7 @@ use Largerio\ConcurrencyLimit\Events\ConcurrencyLimitExceeded;
 use Largerio\ConcurrencyLimit\Events\SlotAcquired;
 use Largerio\ConcurrencyLimit\Events\SlotReleased;
 use Largerio\ConcurrencyLimit\Exceptions\ConcurrencyLimitExceededException;
+use Largerio\ConcurrencyLimit\Exceptions\JobConcurrencyLimitExceededException;
 use Largerio\ConcurrencyLimit\Exceptions\StoreUnavailableException;
 use Largerio\ConcurrencyLimit\Lease;
 use Largerio\ConcurrencyLimit\Queue\Middleware\ConcurrencyLimited;
@@ -256,7 +259,13 @@ describe('jobs that cannot be released', function (): void {
         holdJobSlots('job:'.LimitedJob::class, 'k', 1);
 
         expect(fn (): mixed => Bus::dispatchSync(new LimitedJob($middleware)))
-            ->toThrow(ConcurrencyLimitExceededException::class, 'Too Many Concurrent Requests.');
+            ->toThrow(function (JobConcurrencyLimitExceededException $exception): void {
+                expect($exception->getMessage())->toBe('The job got no concurrency slot in the [job:'.LimitedJob::class.'] pool for the key [k], and cannot be released back to a queue.')
+                    ->and($exception->limiter)->toBe('job:'.LimitedJob::class)
+                    ->and($exception->slots->key)->toBe('k')
+                    ->and($exception->slots->max)->toBe(1)
+                    ->and($exception->getPrevious())->toBeInstanceOf(ConcurrencyLimitExceededException::class);
+            });
 
         expect(jobRecorder()->handled)->toBe([]);
     })->with([
@@ -264,12 +273,38 @@ describe('jobs that cannot be released', function (): void {
         'not releasing' => [new ConcurrencyLimited('k')->dontRelease()],
     ]);
 
+    it('reports a job it cannot release when no caller is left to catch the exception', function (Closure $dispatch): void {
+        Exceptions::fake();
+        Event::fake([ConcurrencyLimitExceeded::class, JobFailed::class]);
+        config(['queue.connections.deferred' => ['driver' => 'deferred']]);
+        holdJobSlots('job:'.LimitedJob::class, 'k', 1);
+
+        $dispatch(new LimitedJob(new ConcurrencyLimited('k')));
+
+        expect(jobRecorder()->handled)->toBe([]);
+        Event::assertDispatchedTimes(ConcurrencyLimitExceeded::class, 1);
+        Event::assertDispatched(JobFailed::class, fn (JobFailed $event): bool => $event->exception instanceof JobConcurrencyLimitExceededException);
+        Exceptions::assertReportedCount(1);
+        Exceptions::assertReported(fn (JobConcurrencyLimitExceededException $exception): bool => $exception->getPrevious() instanceof ConcurrencyLimitExceededException);
+    })->with([
+        'the deferred queue' => [function (LimitedJob $job): void {
+            Bus::dispatch($job->onConnection('deferred'));
+            app(DeferredCallbackCollection::class)->invoke();
+        }],
+        'dispatchAfterResponse()' => [function (LimitedJob $job): void {
+            Bus::dispatchAfterResponse($job);
+
+            // Older Laravel 13 releases let the exception escape terminate(), where the global handler reports it.
+            rescue(fn () => app()->terminate());
+        }],
+    ]);
+
     it('throws for a job without InteractsWithQueue', function (): void {
         holdJobSlots('job:'.JobWithoutQueueInteraction::class, 'k', 1);
         $job = new FakeJob;
 
         expect(fn (): FakeJob => workQueuedJob(new JobWithoutQueueInteraction(new ConcurrencyLimited('k')), $job))
-            ->toThrow(ConcurrencyLimitExceededException::class);
+            ->toThrow(JobConcurrencyLimitExceededException::class, 'The job got no concurrency slot in the [job:'.JobWithoutQueueInteraction::class.'] pool for the key [k], and cannot be released back to a queue.');
 
         expect($job->isReleased())->toBeFalse()
             ->and(jobRecorder()->handled)->toBe([]);
@@ -279,7 +314,7 @@ describe('jobs that cannot be released', function (): void {
         holdJobSlots('job:'.LimitedJob::class, 'k', 1);
 
         expect(fn (): mixed => new ConcurrencyLimited('k')->handle(new LimitedJob, fn (): null => null))
-            ->toThrow(ConcurrencyLimitExceededException::class);
+            ->toThrow(JobConcurrencyLimitExceededException::class);
     });
 });
 
@@ -516,11 +551,27 @@ describe('store failures', function (): void {
         useStore(new ThrowingStore);
 
         expect(fn (): mixed => Bus::dispatchSync(new LimitedJob(new ConcurrencyLimited('k')->failClosed())))
-            ->toThrow(ConcurrencyLimitExceededException::class);
+            ->toThrow(function (JobConcurrencyLimitExceededException $exception): void {
+                expect($exception->getPrevious())->toBeInstanceOf(StoreUnavailableException::class);
+            });
 
         expect(jobRecorder()->handled)->toBe([]);
         Exceptions::assertReportedCount(1);
         Exceptions::assertReported(StoreUnavailableException::class);
+    });
+
+    it('reports the store failure and, apart, the job of the deferred queue it cannot release when failing closed', function (): void {
+        Exceptions::fake();
+        useStore(new ThrowingStore);
+        config(['queue.connections.deferred' => ['driver' => 'deferred']]);
+
+        Bus::dispatch(new LimitedJob(new ConcurrencyLimited('k')->failClosed())->onConnection('deferred'));
+        app(DeferredCallbackCollection::class)->invoke();
+
+        expect(jobRecorder()->handled)->toBe([]);
+        Exceptions::assertReportedCount(2);
+        Exceptions::assertReported(StoreUnavailableException::class);
+        Exceptions::assertReported(fn (JobConcurrencyLimitExceededException $exception): bool => $exception->getPrevious() instanceof StoreUnavailableException);
     });
 });
 
@@ -537,10 +588,14 @@ describe('configuration', function (): void {
             ->toThrow(InvalidArgumentException::class, 'The jitter must be at least 0 seconds, got -1.');
     });
 
-    it('refuses a slot that would not expire, when the job runs', function (): void {
-        expect(fn (): FakeJob => workQueuedJob(new LimitedJob(new ConcurrencyLimited('k')->expireAfter(0))))
+    it('refuses a slot that would not expire, as soon as it is given', function (): void {
+        expect(fn (): ConcurrencyLimited => new ConcurrencyLimited('k')->expireAfter(0))
             ->toThrow(InvalidArgumentException::class, 'Slots must expire after at least 1 second, got 0.')
-            ->and(fn (): FakeJob => workQueuedJob(new LimitedJob(new ConcurrencyLimited('k')->expireAfter(now()->subMinute()))))
+            ->and(fn (): ConcurrencyLimited => new ConcurrencyLimited('k')->expireAfter(-5))
+            ->toThrow(InvalidArgumentException::class, 'Slots must expire after at least 1 second, got -5.')
+            ->and(fn (): ConcurrencyLimited => new ConcurrencyLimited('k', 1, 10, 0))
+            ->toThrow(InvalidArgumentException::class, 'Slots must expire after at least 1 second, got 0.')
+            ->and(fn (): ConcurrencyLimited => new ConcurrencyLimited('k')->expireAfter(now()->subMinute()))
             ->toThrow(InvalidArgumentException::class, 'Slots must expire after at least 1 second, got 0.');
     });
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Largerio\ConcurrencyLimit;
 
+use Illuminate\Auth\Middleware\AuthenticateWithBasicAuth;
 use Illuminate\Contracts\Auth\Middleware\AuthenticatesRequests;
 use Illuminate\Contracts\Http\Kernel as HttpKernelContract;
 use Illuminate\Foundation\Http\Kernel as HttpKernel;
@@ -36,11 +37,28 @@ final class ConcurrencyLimitServiceProvider extends ServiceProvider
          * binding, so a rejection costs no query.
          */
         $this->callAfterResolving(HttpKernelContract::class, function (HttpKernel $kernel): void {
+            $this->prioritiseBasicAuthentication($kernel);
+
             $kernel->addToMiddlewarePriorityAfter([
                 AuthenticatesRequests::class,
+                AuthenticateWithBasicAuth::class,
                 ThrottleRequests::class,
                 ThrottleRequestsWithRedis::class,
             ], LimitConcurrentRequests::class);
         });
+    }
+
+    /**
+     * auth.basic does not implement AuthenticatesRequests, so the framework
+     * leaves it out of the priority list; it joins the other authentication
+     * middleware there, when the list has them.
+     */
+    private function prioritiseBasicAuthentication(HttpKernel $kernel): void
+    {
+        if (! in_array(AuthenticatesRequests::class, $kernel->getMiddlewarePriority(), true)) {
+            return;
+        }
+
+        $kernel->addToMiddlewarePriorityAfter(AuthenticatesRequests::class, AuthenticateWithBasicAuth::class);
     }
 }

@@ -18,9 +18,15 @@ final class ConcurrencyLimitManager
     /** @var array<string, Closure(Request): mixed> */
     private array $limiters = [];
 
-    /** @param Closure(Request): (Slots|array<array-key, Slots>|null) $callback */
+    /**
+     * @param  Closure(Request): (Slots|array<array-key, Slots>|null)  $callback
+     *
+     * @throws InvalidArgumentException when the name is reserved for the job middleware
+     */
     public function for(string $name, Closure $callback): self
     {
+        $this->ensureNotReserved($name);
+
         $this->limiters[$name] = $callback;
 
         return $this;
@@ -49,7 +55,19 @@ final class ConcurrencyLimitManager
             throw new InvalidArgumentException("Concurrency limiter [{$name}] is not defined.");
         }
 
-        return [$pool ?? 'default', [Slots::max($max)]];
+        $pool ??= 'default';
+
+        $this->ensureNotReserved($pool);
+
+        return [$pool, [Slots::max($max)]];
+    }
+
+    /** The job middleware counts its slots under `job:{class}`, or `job` when shared. */
+    private function ensureNotReserved(string $name): void
+    {
+        if ($name === 'job' || str_starts_with($name, 'job:')) {
+            throw new InvalidArgumentException("The concurrency limiter name [{$name}] is reserved for the pools of the job middleware.");
+        }
     }
 
     /** @return list<Slots> */

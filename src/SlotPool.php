@@ -4,8 +4,9 @@ declare(strict_types=1);
 
 namespace Largerio\ConcurrencyLimit;
 
-use Illuminate\Cache\MemcachedStore;
+use Illuminate\Cache\MemcachedLock;
 use Illuminate\Contracts\Cache\Factory as CacheFactory;
+use Illuminate\Contracts\Cache\Lock;
 use Illuminate\Contracts\Cache\LockProvider;
 use Illuminate\Contracts\Config\Repository as Config;
 use Illuminate\Contracts\Debug\ExceptionHandler;
@@ -81,12 +82,18 @@ final readonly class SlotPool
             throw new ConcurrencyLimitExceededException($result);
         }
 
+        $announced = [];
+
         try {
             foreach ($result as $lease) {
+                $announced[] = $lease;
+
                 $this->events->dispatch(new SlotAcquired($limiter, $lease->key, $lease->max, $waited));
             }
         } catch (Throwable $exception) {
-            $this->giveBack($result);
+            // Every slot goes back; only those a listener was told about are announced.
+            $this->reportFailureToGiveBack($result);
+            $this->announceReleased($announced);
 
             throw $exception;
         }
@@ -101,15 +108,8 @@ final readonly class SlotPool
      */
     public function release(array $leases): void
     {
-        $failure = $this->giveBack($leases);
-
-        if ($failure instanceof Throwable) {
-            $this->exceptions->report(new StoreUnavailableException($failure));
-        }
-
-        foreach ($leases as $lease) {
-            $this->events->dispatch(new SlotReleased($lease->limiter, $lease->key, $lease->max, microtime(true) - $lease->acquiredAt));
-        }
+        $this->reportFailureToGiveBack($leases);
+        $this->announceReleased($leases);
     }
 
     /**
@@ -182,36 +182,72 @@ final readonly class SlotPool
         }
 
         $key = $this->keyOf($limiter, $slots);
-        $pool = hash('xxh128', json_encode([$limiter, $key], JSON_THROW_ON_ERROR | JSON_INVALID_UTF8_SUBSTITUTE));
+        $pool = hash('xxh128', serialize([$limiter, $key]));
         $start = random_int(0, $slots->max - 1);
 
         for ($offset = 0; $offset < $slots->max; $offset++) {
             $slot = ($start + $offset) % $slots->max + 1;
             $lock = $store->lock("concurrency:{$pool}:{$slot}", $slots->expireAfter);
 
-            if ($lock->get() === true) {
+            if ($this->take($lock)) {
                 return new Lease($lock, $limiter, $key, $slots->max, microtime(true));
             }
-        }
-
-        if ($store instanceof MemcachedStore) {
-            $this->ensureMemcachedRefused($store->getMemcached());
         }
 
         return null;
     }
 
-    /**
-     * Memcached::add() returns false both when the key exists and when the
-     * server is unreachable; only the result code tells them apart.
-     */
-    private function ensureMemcachedRefused(Memcached $memcached): void
+    private function take(Lock $lock): bool
     {
+        try {
+            $taken = (bool) $lock->get();
+        } catch (Throwable $exception) {
+            // The store may have taken the lock before failing; the release checks the owner.
+            rescue($lock->release(...), report: false);
+
+            throw $exception;
+        }
+
+        if ($taken) {
+            return true;
+        }
+
+        if ($lock instanceof MemcachedLock) {
+            $this->ensureMemcachedAnswered($lock, [Memcached::RES_NOTSTORED, Memcached::RES_DATA_EXISTS], 'Memcached refused a slot');
+        }
+
+        return false;
+    }
+
+    private function free(Lock $lock): void
+    {
+        if ($lock->release()) {
+            return;
+        }
+
+        if ($lock instanceof MemcachedLock) {
+            $this->ensureMemcachedAnswered($lock, [Memcached::RES_SUCCESS, Memcached::RES_NOTFOUND], 'Memcached could not release a slot');
+        }
+    }
+
+    /**
+     * Memcached answers false both when the slot is taken, or no longer owned,
+     * and when a server is unreachable; only the result code tells them apart.
+     * The lock is checked rather than the store, so that a Memcached store
+     * behind a failover store is checked too.
+     *
+     * @param  list<int>  $expected  the result codes of a legitimate false
+     */
+    private function ensureMemcachedAnswered(MemcachedLock $lock, array $expected, string $failure): void
+    {
+        $memcached = (fn (): Memcached => $this->memcached)->call($lock);
         $code = $memcached->getResultCode();
 
-        if (! in_array($code, [Memcached::RES_NOTSTORED, Memcached::RES_DATA_EXISTS], true)) {
-            throw new RuntimeException("Memcached refused every slot with result code {$code}: {$memcached->getResultMessage()}");
+        if (in_array($code, $expected, true)) {
+            return;
         }
+
+        throw new RuntimeException("{$failure}, result code {$code}: {$memcached->getResultMessage()}");
     }
 
     /**
@@ -239,13 +275,31 @@ final readonly class SlotPool
 
         foreach ($leases as $lease) {
             try {
-                $lease->lock->release();
+                $this->free($lease->lock);
             } catch (Throwable $exception) {
                 $failure ??= $exception;
             }
         }
 
         return $failure;
+    }
+
+    /** @param  list<Lease>  $leases */
+    private function reportFailureToGiveBack(array $leases): void
+    {
+        $failure = $this->giveBack($leases);
+
+        if ($failure instanceof Throwable) {
+            $this->exceptions->report(new StoreUnavailableException($failure));
+        }
+    }
+
+    /** @param  list<Lease>  $leases */
+    private function announceReleased(array $leases): void
+    {
+        foreach ($leases as $lease) {
+            $this->events->dispatch(new SlotReleased($lease->limiter, $lease->key, $lease->max, microtime(true) - $lease->acquiredAt));
+        }
     }
 
     private function store(): LockProvider
@@ -289,9 +343,17 @@ final readonly class SlotPool
         return $slots->key ?? throw new LogicException("Every limit of the [{$limiter}] limiter needs a key; resolve the default key before acquiring.");
     }
 
-    /** @param  non-empty-list<Slots>  $limits */
+    /**
+     * A limit of zero never grants a slot, so waiting for it is pointless.
+     *
+     * @param  non-empty-list<Slots>  $limits
+     */
     private function waitBudget(array $limits): int
     {
+        if (array_any($limits, fn (Slots $slots): bool => $slots->max === 0)) {
+            return 0;
+        }
+
         $seconds = min(array_map(fn (Slots $slots): float => $slots->block, $limits));
 
         return (int) round($seconds * 1_000_000);

@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Carbon\CarbonInterval;
+use Illuminate\Cache\MemcachedLock;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
@@ -15,6 +16,7 @@ use Largerio\ConcurrencyLimit\Exceptions\ConcurrencyLimitExceededException;
 use Largerio\ConcurrencyLimit\Exceptions\StoreUnavailableException;
 use Largerio\ConcurrencyLimit\Lease;
 use Largerio\ConcurrencyLimit\Slots;
+use Largerio\ConcurrencyLimit\Tests\Fixtures\ThrowingAfterAcquireStore;
 use Largerio\ConcurrencyLimit\Tests\Fixtures\ThrowingOnReleaseStore;
 use Largerio\ConcurrencyLimit\Tests\Fixtures\ThrowingStore;
 
@@ -138,6 +140,15 @@ describe('acquiring', function (): void {
     it('accepts any key, even one that is not valid UTF-8', function (): void {
         expect(slotPool()->acquire('exports', [Slots::max(1)->by("tenant:\xff")]))->toHaveCount(1)
             ->and(heldLocks()[0])->toMatch('/^concurrency:[0-9a-f]{32}:1$/');
+    });
+
+    it('keeps binary keys apart, even when they differ only in bytes that are not valid UTF-8', function (): void {
+        $pool = slotPool();
+        $network = fn (string $address): string => substr((string) inet_pton($address), 0, 8);
+
+        $pool->acquire('api', [Slots::max(1)->by($network('2001:db8:ff00:1::1'))]);
+
+        expect($pool->acquire('api', [Slots::max(1)->by($network('2001:db8:fe00:1::1'))]))->toHaveCount(1);
     });
 
     it('always rejects a limit of zero without touching the store', function (): void {
@@ -302,6 +313,18 @@ describe('waiting', function (): void {
             ->and(heldLocks())->toBe([slotName('exports', 'team:1', 1)]);
     });
 
+    it('does not wait for a limit of zero, which never grants a slot', function (): void {
+        Sleep::fake();
+
+        expect(fn (): array => slotPool()->acquire('exports', [
+            Slots::max(1)->by('user:1')->block(2),
+            Slots::max(0)->by('team:1')->block(2),
+        ]))->toThrow(ConcurrencyLimitExceededException::class);
+
+        Sleep::assertNeverSlept();
+        expect(heldLocks())->toBe([]);
+    });
+
     it('does not wait when one of the limits does not block', function (): void {
         slotPool()->acquire('exports', [Slots::max(1)->by('team:1')]);
         Sleep::fake();
@@ -373,6 +396,48 @@ describe('events', function (): void {
         expect(heldLocks())->toBe([]);
         Exceptions::assertNothingReported();
     });
+
+    it('announces the release of every slot a throwing SlotAcquired listener was told about, and of no other', function (string $throwingKey, array $announced): void {
+        $failure = new RuntimeException('Metrics are down');
+        $acquired = [];
+        $released = [];
+        Event::listen(SlotReleased::class, function (SlotReleased $event) use (&$released): void {
+            $released[] = $event->key;
+        });
+        Event::listen(SlotAcquired::class, function (SlotAcquired $event) use (&$acquired, $throwingKey, $failure): void {
+            $acquired[] = $event->key;
+
+            if ($event->key === $throwingKey) {
+                throw $failure;
+            }
+        });
+
+        expect(fn (): array => slotPool()->acquire('exports', [Slots::max(1)->by('user:1'), Slots::max(1)->by('team:1')]))
+            ->toThrow(function (RuntimeException $exception) use ($failure): void {
+                expect($exception)->toBe($failure);
+            });
+
+        expect($acquired)->toBe($announced)
+            ->and($released)->toBe($announced)
+            ->and(heldLocks())->toBe([]);
+    })->with([
+        'the first slot' => ['user:1', ['user:1']],
+        'the second slot' => ['team:1', ['user:1', 'team:1']],
+    ]);
+
+    it('reports a failure to give back the slots when a SlotAcquired listener throws', function (): void {
+        Exceptions::fake();
+        useStore(new ThrowingOnReleaseStore);
+        Event::listen(SlotAcquired::class, function (): never {
+            throw new RuntimeException('Metrics are down');
+        });
+
+        expect(fn (): array => slotPool()->acquire('exports', [Slots::max(1)->by('user:1')]))
+            ->toThrow(RuntimeException::class, 'Metrics are down');
+
+        Exceptions::assertReportedCount(1);
+        Exceptions::assertReported(fn (StoreUnavailableException $exception): bool => $exception->getMessage() === 'The concurrency limit store failed: Connection lost');
+    });
 });
 
 describe('store failures', function (): void {
@@ -436,6 +501,17 @@ describe('store failures', function (): void {
 
         expect(slotPool()->acquire('exports', [Slots::max(1)->by('user:1'), Slots::max(1)->by('team:1')]))->toBe([])
             ->and($store->locks)->toBe([]);
+    });
+
+    it('gives back a slot the store took before failing', function (): void {
+        Exceptions::fake();
+        useStore($store = new ThrowingAfterAcquireStore);
+
+        expect(slotPool()->acquire('exports', [Slots::max(2)->by('user:1')]))->toBe([])
+            ->and($store->locks)->toBe([]);
+
+        Exceptions::assertReportedCount(1);
+        Exceptions::assertReported(fn (StoreUnavailableException $exception): bool => $exception->getMessage() === 'The concurrency limit store failed: Read error on connection');
     });
 
     it('treats a failure to give back slots after a refusal as a store failure', function (): void {
@@ -508,7 +584,32 @@ describe('store failures', function (): void {
 
         Exceptions::assertReported(fn (StoreUnavailableException $exception): bool => str_starts_with(
             $exception->getMessage(),
-            'The concurrency limit store failed: Memcached refused every slot with result code ',
+            'The concurrency limit store failed: Memcached refused a slot, result code ',
         ));
+    })->skip(! extension_loaded('memcached'), 'Requires ext-memcached.');
+
+    it('reports a release that an unreachable Memcached server could not perform, and announces it', function (): void {
+        Exceptions::fake();
+        Event::fake([SlotReleased::class]);
+        $memcached = new Memcached;
+        $memcached->addServer('127.0.0.1', 1);
+        $lease = new Lease(new MemcachedLock($memcached, slotName('exports', 'user:1', 1), 60), 'exports', 'user:1', 1, microtime(true));
+
+        slotPool()->release([$lease]);
+
+        Exceptions::assertReportedCount(1);
+        Exceptions::assertReported(fn (StoreUnavailableException $exception): bool => str_starts_with(
+            $exception->getMessage(),
+            'The concurrency limit store failed: Memcached could not release a slot, result code ',
+        ));
+        Event::assertDispatchedTimes(SlotReleased::class, 1);
+    })->skip(! extension_loaded('memcached'), 'Requires ext-memcached.');
+
+    it('reads the client of a Memcached lock from the protected property the framework keeps it in', function (): void {
+        $memcached = new Memcached;
+        $property = new ReflectionProperty(MemcachedLock::class, 'memcached');
+
+        expect($property->isProtected())->toBeTrue()
+            ->and($property->getValue(new MemcachedLock($memcached, 'concurrency:pool:1', 60)))->toBe($memcached);
     })->skip(! extension_loaded('memcached'), 'Requires ext-memcached.');
 });

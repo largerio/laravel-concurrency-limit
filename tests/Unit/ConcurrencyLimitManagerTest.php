@@ -81,6 +81,20 @@ describe('named limiters', function (): void {
             ->and($slots->max)->toBe(5);
     });
 
+    it('reserves the names of job pools', function (string $name): void {
+        expect(fn (): ConcurrencyLimitManager => new ConcurrencyLimitManager()->for($name, fn (): Slots => Slots::max(1)))
+            ->toThrow(InvalidArgumentException::class, "The concurrency limiter name [{$name}] is reserved for the pools of the job middleware.");
+    })->with(['job', 'job:App\\Jobs\\SyncCalendar', 'job:']);
+
+    it('accepts names that only look like job pools', function (string $name): void {
+        $manager = new ConcurrencyLimitManager;
+        $manager->for($name, fn (): Slots => Slots::max(1));
+
+        [$limiter] = $manager->resolve(Request::create('/'), $name);
+
+        expect($limiter)->toBe($name);
+    })->with(['jobs', 'jobs:import', 'my-job', 'Job']);
+
     it('throws when the limiter is not defined', function (): void {
         expect(fn (): array => new ConcurrencyLimitManager()->resolve(Request::create('/'), 'reports'))
             ->toThrow(InvalidArgumentException::class, 'Concurrency limiter [reports] is not defined.');
@@ -119,6 +133,11 @@ describe('inline form', function (): void {
         expect($limiter)->toBe('5')
             ->and($slots->max)->toBe(1);
     });
+
+    it('reserves the names of job pools', function (string $pool): void {
+        expect(fn (): array => new ConcurrencyLimitManager()->resolve(Request::create('/'), '2', $pool))
+            ->toThrow(InvalidArgumentException::class, "The concurrency limiter name [{$pool}] is reserved for the pools of the job middleware.");
+    })->with(['job', 'job:App\\Jobs\\SyncCalendar']);
 
     it('only reads a whole number of slots', function (string $name): void {
         expect(fn (): array => new ConcurrencyLimitManager()->resolve(Request::create('/'), $name))

@@ -21,12 +21,7 @@
     ],
     "require": {
         "php": "^8.4",
-        "illuminate/cache": "^13.0",
-        "illuminate/contracts": "^13.0",
-        "illuminate/http": "^13.0",
-        "illuminate/queue": "^13.0",
-        "illuminate/routing": "^13.0",
-        "illuminate/support": "^13.0"
+        "laravel/framework": "^13.32"
     },
     "require-dev": {
         "larastan/larastan": "^3.15",
