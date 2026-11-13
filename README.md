@@ -457,8 +457,10 @@ Where the exception goes depends on how the job runs:
 
 - **`dispatchSync()` and the `sync` connection**: to the code that dispatched
   the job, once the job's `failed()` method has run. Left uncaught during a
-  request, it is reported and the client gets a `500`, as with any
-  exception. To answer otherwise, catch it:
+  request, it is reported, then rendered as the `concurrency` middleware
+  would answer: a `429` with `Retry-After`, or a `503` when the store failed
+  and the job fails closed, never a `500`. The response shows neither the
+  pool nor the key. To answer otherwise, catch it:
 
   ```php
   use Largerio\ConcurrencyLimit\Exceptions\JobConcurrencyLimitExceededException;

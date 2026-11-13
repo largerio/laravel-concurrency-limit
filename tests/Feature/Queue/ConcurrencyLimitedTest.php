@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Bus;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Event;
 use Illuminate\Support\Facades\Exceptions;
+use Illuminate\Support\Facades\Route;
 use Largerio\ConcurrencyLimit\Events\ConcurrencyLimitExceeded;
 use Largerio\ConcurrencyLimit\Events\SlotAcquired;
 use Largerio\ConcurrencyLimit\Events\SlotReleased;
@@ -572,6 +573,55 @@ describe('store failures', function (): void {
         Exceptions::assertReportedCount(2);
         Exceptions::assertReported(StoreUnavailableException::class);
         Exceptions::assertReported(fn (JobConcurrencyLimitExceededException $exception): bool => $exception->getPrevious() instanceof StoreUnavailableException);
+    });
+});
+
+describe('a job dispatched synchronously during a request', function (): void {
+    beforeEach(function (): void {
+        config(['app.debug' => false]);
+
+        Route::get('/reports', function (): string {
+            Bus::dispatchSync(new LimitedJob(new ConcurrencyLimited('k')->failClosed()));
+
+            return 'done';
+        });
+    });
+
+    it('answers 429 when the job gets no slot, and reports the lost job', function (): void {
+        Exceptions::fake();
+        holdJobSlots('job:'.LimitedJob::class, 'k', 1);
+
+        $this->getJson('/reports')
+            ->assertTooManyRequests()
+            ->assertHeader('Retry-After', '1')
+            ->assertExactJson(['message' => 'Too Many Concurrent Requests.']);
+
+        expect(jobRecorder()->handled)->toBe([]);
+        Exceptions::assertReportedCount(1);
+        Exceptions::assertReported(JobConcurrencyLimitExceededException::class);
+    });
+
+    it('answers 503 rather than 500 when the store fails and the job fails closed', function (): void {
+        Exceptions::fake();
+        useStore(new ThrowingStore);
+
+        $this->getJson('/reports')
+            ->assertServiceUnavailable()
+            ->assertHeader('Retry-After', '1')
+            ->assertExactJson(['message' => 'Service Unavailable.']);
+
+        Exceptions::assertReportedCount(2);
+        Exceptions::assertReported(StoreUnavailableException::class);
+        Exceptions::assertReported(JobConcurrencyLimitExceededException::class);
+    });
+
+    it('renders an HTML error page without the pool or the key', function (): void {
+        holdJobSlots('job:'.LimitedJob::class, 'k', 1);
+
+        $this->get('/reports')
+            ->assertTooManyRequests()
+            ->assertDontSee(LimitedJob::class, escape: false)
+            ->assertDontSee('[k]', escape: false);
     });
 });
 
