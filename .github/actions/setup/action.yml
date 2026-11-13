@@ -15,7 +15,7 @@ inputs:
     required: false
     default: none
   laravel:
-    description: A constraint on laravel/framework, such as `13.30.*`; empty for none.
+    description: A constraint on laravel/framework, such as `13.32.*`; empty for none.
     required: false
     default: ""
   composer-args:
@@ -36,14 +36,14 @@ runs:
         coverage: ${{ inputs.coverage }}
         tools: composer:v2
 
-    # A dev requirement, so laravel/framework stays out of what the package
-    # itself requires.
+    # Narrows the laravel/framework requirement of composer.json, for this
+    # run only.
     - name: Constrain Laravel
       if: inputs.laravel != ''
       shell: bash
       env:
         LARAVEL: ${{ inputs.laravel }}
-      run: composer require --dev --no-update --no-interaction "laravel/framework:$LARAVEL"
+      run: composer require --no-update --no-interaction "laravel/framework:$LARAVEL"
 
     - name: Install dependencies
       shell: bash

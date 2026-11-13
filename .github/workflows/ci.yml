@@ -102,10 +102,9 @@ jobs:
           done
 
   # Real processes against real stores: the multi-process suite. Once on the
-  # newest versions, once on the oldest Laravel release Composer installs, the
-  # other dependencies newest. Below 13.30, every release has a security
-  # advisory, which Composer refuses, and Testbench with Pest 5 needs 13.23 at
-  # least: raise this constraint when that floor moves.
+  # newest versions, once on the lower bound of laravel/framework in
+  # composer.json, the other dependencies newest: move this constraint with
+  # that bound.
   integration:
     name: integration (PHP ${{ matrix.php }}, Laravel ${{ matrix.laravel || 'latest' }})
     needs: images
@@ -120,7 +119,7 @@ jobs:
           - php: "8.5"
             laravel: ""
           - php: "8.4"
-            laravel: "13.30.*"
+            laravel: "13.32.*"
     # Hardened as in docker-compose.dev.yml: no capabilities, no privilege
     # escalation, read-only root filesystem, Redis as its own user.
     services:

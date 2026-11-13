@@ -127,12 +127,13 @@ In CI, the `test` job runs everything but the integration group, on PHP 8.4
 and 8.5, with the lowest and the newest dependencies Composer installs. The
 `integration` job runs the group against Redis and Memcached service
 containers, the same images as `docker-compose.dev.yml`, once on the newest
-dependencies and once on the oldest Laravel release Composer installs. The
-`coverage` job runs the whole suite.
+dependencies and once on Laravel 13.32, the lower bound of `composer.json`.
+The `coverage` job runs the whole suite.
 
-Composer refuses to install a release that has a known security advisory,
-and Testbench and Pest set floors of their own, so the lowest versions
-tested can be above the lower bounds of `composer.json`.
+With the lowest dependencies, Composer installs Laravel 13.32.0, the lower
+bound itself. Composer refuses a release that has a known security advisory,
+though: should one be published against a lower bound, the lowest versions
+tested would move above it.
 
 ## CI
 

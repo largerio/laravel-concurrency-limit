@@ -54,9 +54,9 @@ commands, server-wide limits, and serving waiting requests in arrival order.
 
 ## Installation
 
-Requires PHP 8.4 or later, Laravel 13, and a cache store with atomic locks,
-such as Redis, Memcached or the database store (see
-[Cache stores](#cache-stores)).
+Requires PHP 8.4 or later, Laravel 13.32 or later (`laravel/framework`), and
+a cache store with atomic locks, such as Redis, Memcached or the database
+store (see [Cache stores](#cache-stores)).
 
 ```bash
 composer require largerio/laravel-concurrency-limit
@@ -127,11 +127,15 @@ Route::get('/reports', ReportController::class)->middleware(LimitConcurrentReque
 Routes that use the same limiter share its pools: with the limiter above, a
 user has at most 10 requests in flight across all of them.
 
+The name `job`, and any name that starts with `job:`, are reserved for the
+pools of the [job middleware](#job-middleware): `ConcurrencyLimit::for()`
+throws an `InvalidArgumentException` for them.
+
 ### `Slots`
 
 | Method | Default | Meaning |
 |---|---|---|
-| `Slots::max(int $max)` | required | Maximum simultaneous executions per key. At least `0`; `0` always rejects. |
+| `Slots::max(int $max)` | required | Maximum simultaneous executions per key. At least `0`; `0` always rejects, at once, even with `block()`. |
 | `->by(string\|int $key)` | user, else IP | Key the limit is counted against. |
 | `->block(int\|float $seconds)` | `0` | Opt-in: wait up to this long for a slot before rejecting. At least `0`. |
 | `->expireAfter(int $seconds)` | `60` | Slot TTL: when a slot frees itself if it is never released. At least `1`. |
@@ -163,8 +167,8 @@ populations need a custom `by()`. A user whose identifier is neither an
 integer nor a string is counted by IP address, like a guest.
 
 A pool belongs to its limiter: the key `user:1` in `exports` and the key
-`user:1` in `reports` are two pools. Keys can be any string: they are hashed
-before they reach the cache.
+`user:1` in `reports` are two pools. Keys can be any string, binary data
+included: they are hashed byte for byte before they reach the cache.
 
 Guests are counted by IP address, which depends on
 [trusted proxies](#trusted-proxies).
@@ -196,7 +200,8 @@ worker, so keep this to a couple of seconds.
 
 Waiting requests hold no slot and reserve nothing, and they are not served in
 arrival order: the next free slot goes to whichever request asks first. With
-several limits, the wait is the smallest `block()` among them.
+several limits, the wait is the smallest `block()` among them, and there is
+none when one of them is `Slots::max(0)`, which never grants a slot.
 
 ### Rejection response
 
@@ -233,18 +238,21 @@ Slots::max(5)->failClosed();   // per limiter
 - **Fail-open** (the default): the request or job runs without a slot.
 - **Fail-closed**: a request gets a `503 Service Unavailable` with
   `Retry-After` (the largest `retryAfter()` among the request's limits); a
-  job is released back to the queue, as when no slot is free.
+  job is released back to the queue, as when no slot is free, and a job that
+  cannot be released throws (see
+  [Jobs that cannot be released](#jobs-that-cannot-be-released)).
 
 With [multiple limits](#multiple-limits), one limit that fails closed is
 enough: running without its slot would break its guarantee.
 
 In both modes the failure is passed to `report()` once, as a
-`StoreUnavailableException` wrapping the error the store raised, and never
-becomes a `500`. The `503` is a Symfony `ServiceUnavailableHttpException`
-whose previous exception is that `StoreUnavailableException`: your exception
-handler renders it (JSON clients get JSON) and, as for any HTTP exception,
-does not report it again. To throttle or silence the reports during an
-outage, use the exception handler's own tools:
+`StoreUnavailableException` wrapping the error the store raised, and the
+`concurrency` middleware never turns it into a `500`. The `503` is a Symfony
+`ServiceUnavailableHttpException` whose previous exception is that
+`StoreUnavailableException`: your exception handler renders it (JSON clients
+get JSON) and, as for any HTTP exception, does not report it again. To
+throttle or silence the reports during an outage, use the exception
+handler's own tools:
 
 ```php
 // bootstrap/app.php
@@ -281,38 +289,51 @@ route gets `Slots::max(...)` with the default key, in the pool named by the
 second parameter, `default` if there is none. Routes that use the inline form
 without a pool name therefore share the `default` pool: name a pool to count
 a route on its own. A pool name counts like a limiter name: a named limiter
-of the same name, with the same key, shares its slots.
+of the same name, with the same key, shares its slots. The pool names
+reserved for the job middleware, `job` and any name that starts with `job:`,
+throw an `InvalidArgumentException` on the route's first request.
 
 ### Middleware order
 
-The package places `concurrency` after authentication and rate limiting in
-Laravel's middleware priority, and before route model binding, whatever order
-the route lists them in:
+The package places `concurrency` after authentication, `auth.basic`
+included, and rate limiting in Laravel's middleware priority, and before
+route model binding, whatever order the route lists them in:
 
 - the default key sees the authenticated user;
 - requests that `throttle` rejects take no slot;
 - a rejection costs no database query.
 
+`auth.basic` (`AuthenticateWithBasicAuth`) does not implement
+`AuthenticatesRequests`, so Laravel leaves it out of the priority list: the
+package adds it right after `AuthenticatesRequests`.
+
 If your application sets its own priority list
 (`$middleware->priority([...])` in `bootstrap/app.php`), the package still
+adds `AuthenticateWithBasicAuth` right after `AuthenticatesRequests` when
+your list contains the latter and does not place the former itself. It then
 inserts `LimitConcurrentRequests` right after the last of
-`AuthenticatesRequests`, `ThrottleRequests` and `ThrottleRequestsWithRedis`
-that your list contains. If your list puts `SubstituteBindings` before them,
-the middleware comes after it too: authentication first matters more. If
-your list contains none of the three, the middleware ends up last, with no
-order relative to authentication: add `LimitConcurrentRequests::class` to
-your list yourself, after the authentication and throttling middleware. A
-place your list gives it is kept.
+`AuthenticatesRequests`, `AuthenticateWithBasicAuth`, `ThrottleRequests` and
+`ThrottleRequestsWithRedis` that your list contains. If your list puts
+`SubstituteBindings` before them, the middleware comes after it too:
+authentication first matters more. If your list contains none of the four,
+the middleware ends up last, with no order relative to authentication: add
+`LimitConcurrentRequests::class` to your list yourself, after the
+authentication and throttling middleware. A place your list gives it is
+kept.
 
 ### When a slot is released
 
 - **Normal response**: before the response is returned. A client that sends
   its next request as soon as it has the answer finds its slot free.
-- **Streamed and file responses** (`response()->stream()`,
+- **Streamed responses** (`response()->stream()`,
   `response()->streamJson()`, `response()->eventStream()`,
-  `response()->streamDownload()`, `response()->download()`,
-  `response()->file()`): once the body is sent, in the middleware's
-  `terminate()`. The stream is the work, so it keeps the slot.
+  `response()->streamDownload()`): as soon as the body ends, whether it
+  completes or throws. The stream is the work, so it keeps the slot while it
+  runs. A body written as a generator stays a generator, so Octane still
+  streams it itself. A stream that is never sent is released in the
+  middleware's `terminate()`. Either way, the slot is released once.
+- **File responses** (`response()->download()`, `response()->file()`): once
+  the file is sent, in the middleware's `terminate()`.
 - **Exception**: when the route throws, the slot is released and the
   exception rethrown.
 
@@ -384,7 +405,7 @@ new ConcurrencyLimited(
 | `releaseAfter($delay)` | Delay before the job is tried again when no slot is free, in seconds (at least 0) or as a date. Default 10 s. |
 | `jitter(int $seconds)` | A random extra delay, from 0 to `$seconds`, so jobs rejected together do not come back together. Default: half of `releaseAfter`; none when `releaseAfter` is a date. |
 | `dontRelease()` | Skip the job instead: it is deleted. Explicit opt-in only. A `null` `$releaseAfter` does the same. |
-| `expireAfter($seconds)` | Slot TTL, in seconds or as a date, at least 1 second. Default: the job's timeout plus 10 s, see below. |
+| `expireAfter($seconds)` | Slot TTL, in seconds or as a date, at least 1 second: less, or a date that has passed, throws an `InvalidArgumentException` as soon as it is given. Default: the job's timeout plus 10 s, see below. |
 | `shared()` | Share the pool across job classes. |
 | `withPrefix(string $prefix)` | Change the pool's namespace: the prefix goes before the key. None by default. |
 | `failOpen()` / `failClosed()` | Behavior when the cache store fails, as for [HTTP](#when-the-cache-store-fails). Fail-closed releases the job. |
@@ -397,7 +418,9 @@ shares one pool.
 When the cache store fails, a job that fails open runs without a slot, and a
 job that fails closed is handled as when no slot is free: released with its
 usual delay, or skipped with `dontRelease()`. The failure is reported once
-and not rethrown, so it does not count against `$maxExceptions`.
+and not rethrown, so it does not count against `$maxExceptions`. A job that
+cannot be released throws instead: see
+[Jobs that cannot be released](#jobs-that-cannot-be-released).
 
 ### Slot TTL
 
@@ -409,19 +432,55 @@ turns the timeout off, counts as none. **If your workers run with a longer
 `--timeout` and the job sets no `$timeout`, set `$timeout` on the job or call
 `expireAfter()`**, or a long job may lose its slot while it still runs.
 
-### Sync queue and `dispatchSync()`
+### Jobs that cannot be released
 
-The sync driver has no queue to return a job to. When no slot is free and the
-job runs on the sync driver, through `dispatchSync()`, or without
-`InteractsWithQueue`, the middleware throws `ConcurrencyLimitExceededException`
-to the caller rather than lose the job, even with `dontRelease()`. So does a
-store failure when the job fails closed.
+Releasing a job takes a real queue to run it again, and `InteractsWithQueue`
+to reach it (`Illuminate\Foundation\Queue\Queueable`, as in the example
+above, includes it). When no slot is free and the job cannot be released,
+the middleware throws a `JobConcurrencyLimitExceededException` rather than
+lose the job, even with `dontRelease()`. That is the case of:
 
-The `deferred` and `background` drivers run the job on the sync driver too,
-once the response is sent or in another process, where the exception has no
-caller to reach. The job fails there: its `failed()` method runs and
-`JobFailed` is dispatched, but it is not retried, and the exception, an HTTP
-exception, is not reported. Put limited jobs on a real queue.
+- any job the sync driver runs: `dispatchSync()`, the `sync`, `deferred` and
+  `background` connections, and `dispatchAfterResponse()`;
+- a job without `InteractsWithQueue`, on any connection.
+
+The exception extends `RuntimeException`, not an HTTP exception, so your
+exception handler reports it and the job never vanishes without a trace. Its
+`$limiter` property is the pool (`job:{JobClass}`, or `job` with
+`shared()`), its `$slots` property the limit that refused, and its previous
+exception is the `ConcurrencyLimitExceededException` of the rejection, or the
+`StoreUnavailableException` when the store failed and the job fails closed.
+In that last case there are two reports: the store failure, then the lost
+job.
+
+Where the exception goes depends on how the job runs:
+
+- **`dispatchSync()` and the `sync` connection**: to the code that dispatched
+  the job, once the job's `failed()` method has run. Left uncaught during a
+  request, it is reported and the client gets a `500`, as with any
+  exception. To answer otherwise, catch it:
+
+  ```php
+  use Largerio\ConcurrencyLimit\Exceptions\JobConcurrencyLimitExceededException;
+
+  try {
+      GenerateReport::dispatchSync($report);
+  } catch (JobConcurrencyLimitExceededException) {
+      return response()->json(['message' => 'A report is already being generated.'], 429);
+  }
+  ```
+
+- **`deferred`, `background` and `dispatchAfterResponse()`**: the job runs
+  once the response is sent, or in another process, where no caller is left
+  to catch the exception. The job fails there: its `failed()` method runs,
+  `JobFailed` is dispatched and the exception is reported, but the job is not
+  retried.
+- **A job without `InteractsWithQueue` on a real queue**: the worker handles
+  the exception as any other the job throws. It reports it, then retries or
+  fails the job according to its `$tries`, `retryUntil()`, `$maxExceptions`
+  and backoff.
+
+Put limited jobs on a real queue, with `InteractsWithQueue`.
 
 `block()` does not exist for jobs: a waiting job would hold a worker, while
 releasing is the queue's own way to wait.
@@ -438,7 +497,9 @@ differences are deliberate:
   slot forever.
 - The release delay defaults to 10 seconds plus jitter, not 0: an immediate
   release spins the queue and burns attempts.
-- A job that cannot be released throws, rather than vanish.
+- A job that cannot be released throws a
+  `JobConcurrencyLimitExceededException`, which the exception handler
+  reports, rather than vanish.
 - There is no prefix by default, rather than `laravel-queue-concurrency:`:
   the package names and hashes its own cache keys, so the prefix only tells
   pools apart.
@@ -456,9 +517,14 @@ All in `Largerio\ConcurrencyLimit\Events`, with public readonly properties:
 
 `$key` is the key as given, before hashing. For jobs, `$limiter` is
 `job:{JobClass}`, or `job` with `shared()`, and `$key` starts with the
-`withPrefix()` prefix, if any; a job skipped with `dontRelease()` is a
-rejection too. Nothing is dispatched on a store failure, whether the limit
-fails open or closed: the report is the signal.
+`withPrefix()` prefix, if any; a job skipped with `dontRelease()`, or that
+cannot be released, is a rejection too. Nothing is dispatched on a store
+failure, whether the limit fails open or closed: the report is the signal.
+
+The counts of `SlotAcquired` and `SlotReleased` stay balanced. If a
+`SlotAcquired` listener throws, every slot just taken is released,
+`SlotReleased` is dispatched for each `SlotAcquired` already dispatched, and
+the listener's exception is rethrown.
 
 Metrics are a listener away:
 
@@ -545,10 +611,11 @@ concurrency:{xxh128 hash of the limiter and the key}:{slot number}
   safe: slots are numbered, and a lower limit stops handing out the high
   ones.
 - Each operation touches a single key, so Redis Cluster works.
-- Keys are hashed with xxh128 together with the limiter name: they have a
-  fixed length, fit every store's key limits, and don't appear in clear text
-  in the cache. xxh128 is not a cryptographic hash, though: anyone who can
-  read the cache can still test guesses.
+- Keys are hashed with xxh128 together with the limiter name, byte for byte,
+  so any string works, binary data included: they have a fixed length, fit
+  every store's key limits, and don't appear in clear text in the cache.
+  xxh128 is not a cryptographic hash, though: anyone who can read the cache
+  can still test guesses.
 
 The cost is in round trips to the store: a rejection tries every slot, so it
 costs `max` round trips, and so does every poll of a waiting request. That
@@ -567,7 +634,7 @@ Any store that implements `Illuminate\Contracts\Cache\LockProvider` works.
 | `dynamodb` | Implements locks, but the integration tests don't cover it. |
 | `array` | One process only: fine for tests, meaningless under PHP-FPM, where each worker has its own. |
 | `null` | Grants every slot, so nothing is limited: a way to turn the package off in one environment. |
-| `failover` | Supported, with a limit: it moves on to the next store only when a store fails to create the lock, which in practice means a phpredis connection that cannot be opened. When the error only comes as the lock is taken (predis, the database store, a connection lost while the process runs), the limit fails open or closed as with any store. Slots taken on the secondary store during an outage are unknown to the primary once it is back, so a few extra executions may get in at the switch. |
+| `failover` | Supported, with a limit: it moves on to the next store only when a store fails to create the lock, which in practice means a phpredis connection that cannot be opened. When the error only comes as the lock is taken (predis, the database store, a connection lost while the process runs), the limit fails open or closed as with any store. That is also the case of Memcached, whose failures the package detects behind `failover` as without it (see [Memcached](#memcached)). Slots taken on the secondary store during an outage are unknown to the primary once it is back, so a few extra executions may get in at the switch. |
 | `apc`, `session`, a custom store without locks | Throws a `LogicException` on first use, in both fail modes. |
 
 ### Database store and transactions
@@ -588,9 +655,22 @@ difference. Redis and Memcached expire keys by their own clock.
 
 `Memcached::add()` answers `false` both when the key exists and when the
 server cannot be reached, so a dead Memcached would look like a full pool.
-After a refused scan, the package checks the client's result code, and
-treats anything but "the key already exists" as a store failure, which then
-fails open or closed.
+The package checks the client's result code after every refused slot, and
+treats anything but "the key already exists" (`RES_NOTSTORED`, or
+`RES_DATA_EXISTS` with the binary protocol) as a store failure rather than a
+full pool: the limit fails open or closed, and never answers `429` for it.
+So:
+
+- behind a `failover` store, a dead Memcached is detected as without it,
+  since the check is made on the lock rather than on the store;
+- with several servers, a slot refused by a server that cannot be reached is
+  a store failure, even when the other servers answer.
+
+Releasing is checked the same way. When Memcached does not delete a slot
+for another reason than the slot having expired or changed owner (a result
+code other than `RES_SUCCESS` or `RES_NOTFOUND`), the failure is reported as
+a `StoreUnavailableException`, and the slot frees itself when its TTL runs
+out.
 
 On Memcached and the file store, the framework releases a lock in two steps,
 reading its owner then deleting it. If the slot expires between the two, the
@@ -663,8 +743,8 @@ configuration files and cache keys, so routes can move over one at a time.
 | `ConcurrentLimitWaitStarted` | Removed |
 | `CacheOperationFailed` | `StoreUnavailableException`, passed to `report()` |
 
-The new package requires PHP 8.4 and Laravel 13. Once no route uses the old
-one, remove it and its `config/concurrent-limiter.php`.
+The new package requires PHP 8.4 or later and Laravel 13.32 or later. Once
+no route uses the old one, remove it and its `config/concurrent-limiter.php`.
 
 ## Credits
 
