@@ -1,8 +1,10 @@
 * text=auto eol=lf
 
 # Only src/, config/, composer.json and the user-facing documents
-# (README, CHANGELOG, LICENSE) go into the Composer dist archive.
+# (README, CHANGELOG, LICENSE) go into the Composer dist archive. The README's
+# images in art/ stay out: they are read on GitHub and Packagist.
 /.github                export-ignore
+/art                    export-ignore
 /tests                  export-ignore
 /.dockerignore          export-ignore
 /.editorconfig          export-ignore
