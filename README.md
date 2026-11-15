@@ -201,6 +201,11 @@ ConcurrencyLimit::for('ai', fn (Request $request) => $request->user()->isStaff()
     : Slots::max($request->user()->plan->concurrency));
 ```
 
+With `block()`, a request waits for a slot, up to the time given, rather than
+being rejected immediately:
+
+![Animation of a pool of two slots whose limit waits up to two seconds: a third request waits and takes a slot as soon as one is released, a fourth waits until its time is up and is rejected with a 429.](art/waiting.svg)
+
 ### `Slots`
 
 | Method | Default | Meaning |
