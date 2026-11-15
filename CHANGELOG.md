@@ -8,9 +8,7 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [1.0.0] - 2026-11-13
 
-The first release. It replaces `largerio/laravel-concurrent-limiter`, written
-again from scratch: see
-[Coming from laravel-concurrent-limiter](README.md#coming-from-laravel-concurrent-limiter).
+The first release.
 
 ### Added
 

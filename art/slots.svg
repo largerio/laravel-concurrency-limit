@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 300" width="880" height="300" role="img" aria-labelledby="title desc">
   <title id="title">How slots work</title>
-  <desc id="desc">A pool of two slots. Requests A and B each take a free slot. Request C finds both taken and is rejected at once with a 429. When A's response is sent its slot is released and request D takes it. B's process is killed, so nothing releases its slot: the slot frees itself when its TTL runs out.</desc>
+  <desc id="desc">A pool of two slots. Requests A and B each take a free slot. Request C finds both taken and is rejected immediately with a 429. When A's response is sent its slot is released and request D takes it. B's process is killed, so nothing releases its slot: the slot frees itself when its TTL runs out.</desc>
   <style>
     .bg { fill: #ffffff; stroke: #d0d7de; }
     .text { fill: #1f2328; }
@@ -210,7 +210,7 @@
 
   <g class="text caption" text-anchor="middle">
     <text class="anim cap1" x="440" y="268">A and B each take a free slot.</text>
-    <text class="anim cap2" x="440" y="268">C finds both slots taken: rejected at once with a 429.</text>
+    <text class="anim cap2" x="440" y="268">C finds both slots taken: rejected immediately with a 429.</text>
     <text class="anim cap3" x="440" y="268">A's response is sent, its slot is released, and D takes it.</text>
     <text class="anim cap4" x="440" y="268">B's process is killed. Nothing releases its slot…</text>
     <text class="anim cap5" x="440" y="268">…so it frees itself when its TTL runs out. No cleanup needed.</text>
