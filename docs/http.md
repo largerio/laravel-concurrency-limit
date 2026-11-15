@@ -101,6 +101,8 @@ in one array throw a `LogicException`.
 ConcurrencyLimit::for('checkout', fn () => Slots::max(1)->block(2));
 ```
 
+![Animation of a pool of two slots whose limit waits up to two seconds: a third request waits and takes a slot as soon as one is released, a fourth waits until its time is up and is rejected with a 429.](../art/waiting.svg)
+
 By default a request is rejected immediately. With `block()`, it polls for a free
 slot, every 100 ms give or take 50% (the randomness keeps waiting requests
 from polling in step), until the time is up. A waiting request holds a PHP
