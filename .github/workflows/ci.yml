@@ -218,14 +218,14 @@ jobs:
           files=$(git archive --format=tar HEAD | tar -tf - | grep -v '/$' | sort)
           echo "$files"
 
-          unexpected=$(grep -Ev '^(src/|config/|composer\.json$|README\.md$|CHANGELOG\.md$|LICENSE\.md$)' <<< "$files" || true)
+          unexpected=$(grep -Ev '^(src/|config/|docs/|composer\.json$|README\.md$|CHANGELOG\.md$|LICENSE\.md$)' <<< "$files" || true)
           if [ -n "$unexpected" ]; then
             echo "::error::The archive holds files outside the package; mark them export-ignore in .gitattributes:"
             echo "$unexpected"
             exit 1
           fi
 
-          for expected in composer.json README.md CHANGELOG.md LICENSE.md src/ config/; do
+          for expected in composer.json README.md CHANGELOG.md LICENSE.md src/ config/ docs/; do
             if ! grep -q "^$expected" <<< "$files"; then
               echo "::error::$expected is missing from the archive"
               exit 1

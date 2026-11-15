@@ -73,7 +73,7 @@
   <rect class="run" x="545" y="364" width="230" height="18" rx="4"/>
   <rect class="run" x="591" y="390" width="230" height="18" rx="4"/>
 
-  <text class="muted small" x="346" y="351">2 in flight: refused at once</text>
+  <text class="muted small" x="346" y="351">2 in flight: refused immediately</text>
   <text class="muted small" x="537" y="377" text-anchor="end">a slot is free: admitted</text>
 
   <!-- Time axis -->

@@ -67,8 +67,8 @@ would. `make matrix` installs each PHP version's dependencies in
    covered, and CI fails below 100%.
 5. Add an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for any
    change a user of the package can notice (see [Changelog](#changelog)).
-6. Update [README.md](README.md) when you change the public API, a default
-   or a documented trade-off.
+6. Update [README.md](README.md) and the reference in `docs/` when you
+   change the public API, a default or a documented trade-off.
 7. Commit with a clear message (see [Commit messages](#commit-messages)),
    and open a pull request.
 
@@ -141,7 +141,7 @@ Every pull request runs:
 
 - `lint`, `analyse`, `test`, `integration` and `coverage`, as above;
 - `package`: `composer validate --strict`, and a check that the archive
-  Composer installs holds only `src/`, `config/`, `composer.json`,
+  Composer installs holds only `src/`, `config/`, `docs/`, `composer.json`,
   `README.md`, `CHANGELOG.md` and `LICENSE.md` (anything else is marked
   `export-ignore` in `.gitattributes`);
 - `audit`: `composer audit`;

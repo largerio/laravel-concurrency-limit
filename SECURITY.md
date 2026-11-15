@@ -15,9 +15,6 @@ issues within 7 days.
 Fixes ship in new releases of the latest major version, and older releases
 aren't patched. [CHANGELOG.md](CHANGELOG.md) lists what each release changes.
 
-`largerio/laravel-concurrent-limiter`, which this package replaces, gets no
-fixes.
-
 ## Scope
 
 This package caps how many executions one user, tenant or key runs at once.
@@ -39,6 +36,6 @@ Out of scope, because the README documents them:
 - An extra execution admitted when a slot outlives its TTL, during a failover
   between cache stores, or while the store is down and the limit fails open
 - Anonymous clients sharing one pool behind a proxy the application does not
-  trust ([trusted proxies](README.md#trusted-proxies))
+  trust ([trusted proxies](docs/http.md#trusted-proxies))
 - Keys that can be guessed from the cache: they are hashed with xxh128, which
   keeps them out of the cache in clear text but is not a cryptographic hash
