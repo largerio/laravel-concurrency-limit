@@ -68,7 +68,7 @@ commands, server-wide limits, and serving waiting requests in arrival order.
 
 ## Installation
 
-Requires PHP 8.4 or later, Laravel 13.32 or later (`laravel/framework`), and
+Requires PHP 8.4 or later, Laravel 13.40 or later (`laravel/framework`), and
 a cache store with atomic locks, such as Redis, Memcached or the database
 store (see [Cache stores](#cache-stores)).
 

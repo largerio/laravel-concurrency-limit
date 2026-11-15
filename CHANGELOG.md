@@ -6,6 +6,10 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Requires `laravel/framework` 13.40 or later. Earlier 13.x releases are affected by a security advisory in the framework ([GHSA-63hm-g96r-2m2q](https://github.com/advisories/GHSA-63hm-g96r-2m2q)), and Composer no longer installs them.
+
 ## [1.0.0] - 2026-11-13
 
 The first release.
