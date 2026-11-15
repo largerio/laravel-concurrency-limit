@@ -1,5 +1,10 @@
 # Laravel Concurrency Limit
 
+[![Latest version on Packagist](https://img.shields.io/packagist/v/largerio/laravel-concurrency-limit.svg)](https://packagist.org/packages/largerio/laravel-concurrency-limit)
+[![CI](https://github.com/largerio/laravel-concurrency-limit/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/largerio/laravel-concurrency-limit/actions/workflows/ci.yml)
+[![PHP version](https://img.shields.io/packagist/php-v/largerio/laravel-concurrency-limit.svg)](composer.json)
+[![License](https://img.shields.io/packagist/l/largerio/laravel-concurrency-limit.svg)](LICENSE.md)
+
 Cap the HTTP requests in flight and the queued jobs running at once, per user,
 tenant or key.
 
@@ -7,6 +12,8 @@ Laravel can limit a *rate* (`throttle`, `RateLimited`) and can run a closure
 under a concurrency cap (`Cache::funnel()`). It has no HTTP middleware that
 caps the requests in flight, and no job middleware that lets N jobs run at
 once (`WithoutOverlapping` lets one). This package adds both.
+
+![Five expensive requests from one user. With throttle:3,1, three run at once, then two are refused while nothing runs. With concurrency:2, at most two run at once, and a request gets in as soon as a slot is free.](art/rate-vs-concurrency.svg)
 
 It does one thing: **application-level fairness**. One user, tenant or
 resource cannot hold more than N executions at once, so it cannot monopolise
@@ -602,6 +609,8 @@ lock, taken with the store's atomic lock operation:
 ```
 concurrency:{xxh128 hash of the limiter and the key}:{slot number}
 ```
+
+![Animation of a pool of two slots: two requests each take a slot, a third is rejected with a 429, a released slot is taken by the next request, and the slot of a killed process frees itself when its TTL runs out.](art/slots.svg)
 
 - A request tries the slots once each, starting from a random one, and takes
   the first free one. Each slot has its own TTL (`expireAfter()`), so a

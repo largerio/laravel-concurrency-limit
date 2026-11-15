@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 450" width="880" height="450" role="img" aria-labelledby="title desc">
+  <title id="title">Rate limit compared with concurrency limit</title>
+  <desc id="desc">Five expensive requests from one user. With throttle:3,1 the first three run at once and the last two are refused although nothing is running. With concurrency:2 at most two run at once: the third is refused, and the last two are admitted because a slot is free.</desc>
+  <style>
+    .bg { fill: #ffffff; stroke: #d0d7de; }
+    .text { fill: #1f2328; }
+    .muted { fill: #59636e; }
+    .run { fill: #0969da; }
+    .rejected { fill: #ffebe9; stroke: #cf222e; }
+    .red { fill: #cf222e; }
+    .band { fill: #cf222e; fill-opacity: .08; }
+    .axis { stroke: #d0d7de; }
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 12px; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; font-weight: 600; }
+    .title { font-size: 14px; }
+    .small { font-size: 11px; }
+    .pill { font-size: 11px; font-weight: 600; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; stroke: #30363d; }
+      .text { fill: #e6edf3; }
+      .muted { fill: #9198a1; }
+      .run { fill: #4493f8; }
+      .rejected { fill: #2d1214; stroke: #f85149; }
+      .red { fill: #f85149; }
+      .band { fill: #f85149; fill-opacity: .12; }
+      .axis { stroke: #30363d; }
+    }
+  </style>
+
+  <rect class="bg" x=".5" y=".5" width="879" height="449" rx="8"/>
+
+  <!-- Rate limit -->
+  <text x="24" y="32"><tspan class="code text">throttle:3,1</tspan><tspan class="title muted" dx="10">counts the requests started per minute</tspan></text>
+  <text class="muted" x="24" y="52">Three expensive requests run at once, then the next two are refused while nothing runs.</text>
+
+  <rect class="band" x="292" y="66" width="138" height="122" rx="3"/>
+
+  <g class="muted small" text-anchor="end">
+    <text x="184" y="85">request 1</text>
+    <text x="184" y="111">request 2</text>
+    <text x="184" y="137">request 3</text>
+    <text x="184" y="163">request 4</text>
+    <text x="184" y="189">request 5</text>
+  </g>
+
+  <rect class="run" x="200" y="72" width="230" height="18" rx="4"/>
+  <rect class="run" x="246" y="98" width="230" height="18" rx="4"/>
+  <rect class="run" x="292" y="124" width="230" height="18" rx="4"/>
+  <rect class="rejected" x="545.5" y="150.5" width="43" height="17" rx="8.5"/>
+  <text class="red pill" x="567" y="163" text-anchor="middle">429</text>
+  <rect class="rejected" x="591.5" y="176.5" width="43" height="17" rx="8.5"/>
+  <text class="red pill" x="613" y="189" text-anchor="middle">429</text>
+
+  <text class="red small" x="361" y="176" text-anchor="middle">3 in flight</text>
+  <text class="muted small" x="646" y="189">nothing in flight, still refused</text>
+
+  <!-- Concurrency limit -->
+  <text x="24" y="246"><tspan class="code text">concurrency:2</tspan><tspan class="title muted" dx="10">counts the requests in flight</tspan></text>
+  <text class="muted" x="24" y="266">Never more than two at once, and a request gets in as soon as a slot is free.</text>
+
+  <g class="muted small" text-anchor="end">
+    <text x="184" y="299">request 1</text>
+    <text x="184" y="325">request 2</text>
+    <text x="184" y="351">request 3</text>
+    <text x="184" y="377">request 4</text>
+    <text x="184" y="403">request 5</text>
+  </g>
+
+  <rect class="run" x="200" y="286" width="230" height="18" rx="4"/>
+  <rect class="run" x="246" y="312" width="230" height="18" rx="4"/>
+  <rect class="rejected" x="292.5" y="338.5" width="43" height="17" rx="8.5"/>
+  <text class="red pill" x="314" y="351" text-anchor="middle">429</text>
+  <rect class="run" x="545" y="364" width="230" height="18" rx="4"/>
+  <rect class="run" x="591" y="390" width="230" height="18" rx="4"/>
+
+  <text class="muted small" x="346" y="351">2 in flight: refused at once</text>
+  <text class="muted small" x="537" y="377" text-anchor="end">a slot is free: admitted</text>
+
+  <!-- Time axis -->
+  <line class="axis" x1="200" y1="424.5" x2="840" y2="424.5"/>
+  <path class="axis" d="M834 420.5l6 4-6 4" fill="none"/>
+  <text class="muted small" x="200" y="440">time, all within one minute</text>
+</svg>
