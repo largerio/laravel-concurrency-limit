@@ -6,9 +6,12 @@ follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-16
+
 ### Changed
 
 - Requires `laravel/framework` 13.40 or later. Earlier 13.x releases are affected by a security advisory in the framework ([GHSA-63hm-g96r-2m2q](https://github.com/advisories/GHSA-63hm-g96r-2m2q)), and Composer no longer installs them.
+- The reference documentation moved from the README to [`docs/http.md`](docs/http.md), [`docs/jobs.md`](docs/jobs.md) and [`docs/stores.md`](docs/stores.md), which ship with the package.
 
 ## [1.0.0] - 2026-11-13
 
@@ -30,5 +33,6 @@ The first release.
 - Events: `SlotAcquired`, `SlotReleased` and `ConcurrencyLimitExceeded`. `SlotReleased` balances `SlotAcquired`, even when a `SlotAcquired` listener throws.
 - Works on any cache store with atomic locks. Requires PHP 8.4 or later and `laravel/framework` 13.32 or later.
 
-[Unreleased]: https://github.com/largerio/laravel-concurrency-limit/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/largerio/laravel-concurrency-limit/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/largerio/laravel-concurrency-limit/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/largerio/laravel-concurrency-limit/releases/tag/v1.0.0
