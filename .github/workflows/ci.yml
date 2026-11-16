@@ -104,9 +104,10 @@ jobs:
   # Real processes against real stores: the multi-process suite. Once on the
   # newest versions, once on the lower bound of laravel/framework in
   # composer.json, the other dependencies newest: move this constraint with
-  # that bound.
+  # that bound. The job name leaves the version out, so the checks required
+  # on main stay the same when the bound moves.
   integration:
-    name: integration (PHP ${{ matrix.php }}, Laravel ${{ matrix.laravel || 'latest' }})
+    name: integration (PHP ${{ matrix.php }}, Laravel ${{ matrix.bound }})
     needs: images
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -117,8 +118,10 @@ jobs:
       matrix:
         include:
           - php: "8.5"
+            bound: latest
             laravel: ""
           - php: "8.4"
+            bound: lowest
             laravel: "13.40.*"
     # Hardened as in docker-compose.dev.yml: no capabilities, no privilege
     # escalation, read-only root filesystem, Redis as its own user.
