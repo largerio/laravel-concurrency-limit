@@ -5,9 +5,9 @@
 ARG PHP_VERSION=8.5
 
 FROM composer:2.11.2@sha256:5bcb28b8d0edc4091125f8218f9d088f998bdfc843f8fbb9a4beb4dcd8625684 AS composer
-FROM mlocati/php-extension-installer:2.13.2@sha256:4fd45396c16685266d32bf147a24ecd5e81029d3820295895bf4a90131190ac9 AS php-extension-installer
+FROM mlocati/php-extension-installer:2.13.3@sha256:edda5f9d936fba9b495bdc96ecd19cc8fda7c2574f85db4574795644ae57b456 AS php-extension-installer
 
-FROM php:8.4.28RC1-cli-alpine3.24@sha256:ac2ff9c5a33cc1554fce0c138e7e9cc3ca6f71d01dc306696562eb2f7f7d6b71 AS php-8.4
+FROM php:8.4.28-cli-alpine3.24@sha256:d64c04fbee7a93c48226fe40380b5e121856d90739dadb7c74574f9995338700 AS php-8.4
 FROM php:8.5.12-cli-alpine3.24@sha256:1ff5b45922ab30f418447c6089dbe2eba5f01e0b2742863d0327ac349305d70f AS php-8.5
 
 # A stage defined above, already pinned by digest.
